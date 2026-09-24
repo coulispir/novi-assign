@@ -1,0 +1,29 @@
+# Build outputs
+[Bb]in/
+[Oo]bj/
+artifacts/
+
+# NuGet
+*.nupkg
+**/packages/*
+
+# Test / coverage
+TestResults/
+[Cc]overage*/
+*.coverage
+*.coveragexml
+
+# User / IDE
+*.user
+*.suo
+*.userosscache
+.vs/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local secrets
+.env
