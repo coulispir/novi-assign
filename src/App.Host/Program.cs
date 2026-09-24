@@ -1,0 +1,125 @@
+using System;
+using System.Threading.Tasks;
+using Core.Service.Data;
+using Core.Service.Interfaces;
+using Core.Service.Jobs;
+using Core.Service.Repositories;
+using Core.Service.Services;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Quartz;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Fetch connection string securely injected by Docker Compose
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+
+if (string.IsNullOrEmpty(connectionString))
+{
+    throw new InvalidOperationException("Database connection string 'DefaultConnection' is missing from configuration.");
+}
+
+// Register the SystemDbContext using SQL Server defaults
+builder.Services.AddDbContext<SystemDbContext>(options =>
+    options.UseSqlServer(connectionString, sqlOptions =>
+    {
+        // Resiliency strategy: automatically handles transient network drops
+        sqlOptions.EnableRetryOnFailure(
+            maxRetryCount: 5,
+            maxRetryDelay: TimeSpan.FromSeconds(10),
+            errorNumbersToAdd: null);
+            
+        // Tell EF Core that migrations live inside the Core.Service assembly, not here
+        sqlOptions.MigrationsAssembly("Core.Service");
+    }));
+
+// Register the external integration gateway using HttpClient factory pattern rules
+builder.Services.AddHttpClient<IEcbGateway, Ecb.Gateway.Services.EcbGateway>(client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(15);
+    client.DefaultRequestHeaders.Add("User-Agent", "WalletManagementSystem/1.0");
+});
+
+// Register application services and data repositories
+builder.Services.AddScoped<ICurrencyValueRepository, CurrencyValueRepository>();
+builder.Services.AddScoped<IEcbRatesService, EcbRatesService>();
+
+// Schedule the ECB rate synchronization job to run on startup and every minute thereafter
+builder.Services.AddQuartz(q =>
+{
+    // Nodes join the same cluster by sharing the (default) scheduler name; each needs a unique instance id
+    q.UseInstanceIdGenerator<UniqueNodeInstanceIdGenerator>();
+
+    // Clustered SQL Server job store: each trigger fire is acquired by exactly one node, and
+    // [DisallowConcurrentExecution] is enforced cluster-wide. If a node dies, another one takes over.
+    q.UsePersistentStore(store =>
+    {
+        store.UseSqlServer(connectionString);
+        store.UseSystemTextJsonSerializer();
+        store.UseClustering();
+        store.ProvisionSchema(); // Creates the QRTZ_* tables on first startup if they are missing
+    });
+
+    q.AddJob<EcbSyncJob>(opts => opts.WithIdentity(EcbSyncJob.Key));
+
+    q.AddTrigger(opts => opts
+        .ForJob(EcbSyncJob.Key)
+        .WithIdentity($"{nameof(EcbSyncJob)}-trigger")
+        .StartNow()
+        .WithSimpleSchedule(schedule => schedule
+            .WithInterval(TimeSpan.FromMinutes(1))
+            .RepeatForever()));
+});
+
+builder.Services.AddQuartzHostedService(options => options.WaitForJobsToComplete = true);
+
+
+// Add API Routing Controllers capability and dynamically discover external modules
+builder.Services.AddControllers()
+    .AddApplicationPart(typeof(Wallet.Api.AssemblyReference).Assembly)
+    .AddApplicationPart(typeof(Exchange.Api.AssemblyReference).Assembly);
+
+var app = builder.Build();
+
+// Configure HTTP Request Pipeline
+if (app.Environment.IsDevelopment())
+{
+    app.UseDeveloperExceptionPage();
+}
+
+app.UseRouting();
+app.MapControllers();
+
+// AUTOMATED DB INITIALIZATION AUTOMATION
+// Creates database and applies migrations on startup if they don't exist yet
+await ApplyDatabaseMigrationsAsync(app);
+
+app.Run();
+
+// Scoped lifecycle management method for database migrations
+static async Task ApplyDatabaseMigrationsAsync(WebApplication app)
+{
+    using var scope = app.Services.CreateScope();
+    var services = scope.ServiceProvider;
+    var logger = services.GetRequiredService<ILogger<Program>>();
+    
+    try
+    {
+        logger.LogInformation("Checking database state and applying migrations...");
+        var context = services.GetRequiredService<SystemDbContext>();
+        
+        // This will block execution until the SQL Server container accepts the schema,
+        // matching the health check lifecycle setup inside your Docker Compose file.
+        await context.Database.MigrateAsync();
+        logger.LogInformation("Database migrations applied successfully.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "An error occurred while migrating the database engine.");
+        throw; // Prevent application from running in a broken state
+    }
+}
