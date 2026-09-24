@@ -1,0 +1,32 @@
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: mssql-db-container
+    platform: linux/amd64
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=${DB_PASSWORD}
+    ports:
+      - "${DB_PORT}:1433"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q \"SELECT 1\" -C || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q \"SELECT 1\" -C"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+
+  webapi:
+    image: mcr.microsoft.com/dotnet/sdk:10.0
+    container_name: host-app-container
+    volumes:
+      - .:/app
+    working_dir: /app
+    ports:
+      - "${APP_PORT}:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=${ASPNET_ENV}
+      - ASPNETCORE_URLS=http://+:8080
+      - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=FinancialSystemDb;User Id=sa;Password=${DB_PASSWORD};TrustServerCertificate=True;
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    command: dotnet watch run --project src/App.Host --no-launch-profile
