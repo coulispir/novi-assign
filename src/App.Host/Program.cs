@@ -2,10 +2,12 @@ using System;
 using System.Threading.Tasks;
 using Core.Service.Data;
 using Core.Service.Interfaces;
+using Core.Service.Handlers;
 using Core.Service.Jobs;
 using Core.Service.Repositories;
 using Core.Service.Services;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -22,6 +24,12 @@ if (string.IsNullOrEmpty(connectionString))
 {
     throw new InvalidOperationException("Database connection string 'DefaultConnection' is missing from configuration.");
 }
+
+// Strategies are stateless; they must share the factory's singleton lifetime
+builder.Services.AddSingleton<Core.Service.Strategies.IBalanceStrategy, Core.Service.Strategies.AddFundsStrategy>();
+builder.Services.AddSingleton<Core.Service.Strategies.IBalanceStrategy, Core.Service.Strategies.SubtractFundsStrategy>();
+builder.Services.AddSingleton<Core.Service.Strategies.IBalanceStrategy, Core.Service.Strategies.ForceSubtractFundsStrategy>();
+builder.Services.AddSingleton<Core.Service.Strategies.IBalanceStrategyFactory, Core.Service.Strategies.BalanceStrategyFactory>();
 
 // Register the SystemDbContext using SQL Server defaults
 builder.Services.AddDbContext<SystemDbContext>(options =>
@@ -47,6 +55,9 @@ builder.Services.AddHttpClient<IEcbGateway, Ecb.Gateway.Services.EcbGateway>(cli
 // Register application services and data repositories
 builder.Services.AddScoped<ICurrencyValueRepository, CurrencyValueRepository>();
 builder.Services.AddScoped<IEcbRatesService, EcbRatesService>();
+builder.Services.AddScoped<IWalletRepository, WalletRepository>();
+builder.Services.AddScoped<IWalletService, WalletService>();
+builder.Services.AddScoped<IWalletHandler, WalletHandler>();
 
 // Schedule the ECB rate synchronization job to run on startup and every minute thereafter
 builder.Services.AddQuartz(q =>
@@ -111,6 +122,11 @@ static async Task ApplyDatabaseMigrationsAsync(WebApplication app)
     {
         logger.LogInformation("Checking database state and applying migrations...");
         var context = services.GetRequiredService<SystemDbContext>();
+
+        // SQL Server reports a missing catalog as login failure 18456/38 instead of "database does not exist",
+        // so EF cannot auto-create FinancialSystemDb. Create it via master first, then migrate.
+        await EnsureDatabaseExistsAsync(context.Database.GetConnectionString()
+            ?? throw new InvalidOperationException("Database connection string is missing."));
         
         // This will block execution until the SQL Server container accepts the schema,
         // matching the health check lifecycle setup inside your Docker Compose file.
@@ -122,4 +138,24 @@ static async Task ApplyDatabaseMigrationsAsync(WebApplication app)
         logger.LogError(ex, "An error occurred while migrating the database engine.");
         throw; // Prevent application from running in a broken state
     }
+}
+
+static async Task EnsureDatabaseExistsAsync(string applicationConnectionString)
+{
+    var source = new SqlConnectionStringBuilder(applicationConnectionString);
+    var databaseName = source.InitialCatalog;
+    if (string.IsNullOrWhiteSpace(databaseName))
+        throw new InvalidOperationException("Connection string does not specify a database name.");
+
+    var master = new SqlConnectionStringBuilder(applicationConnectionString)
+    {
+        InitialCatalog = "master"
+    };
+
+    var sanitizedName = databaseName.Replace("]", "]]");
+    await using var connection = new SqlConnection(master.ConnectionString);
+    await connection.OpenAsync();
+    await using var command = connection.CreateCommand();
+    command.CommandText = $"IF DB_ID(N'{sanitizedName}') IS NULL CREATE DATABASE [{sanitizedName}];";
+    await command.ExecuteNonQueryAsync();
 }

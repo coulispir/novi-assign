@@ -19,6 +19,9 @@ services:
     container_name: host-app-container
     volumes:
       - .:/app
+      # Keep container build output off the host bind-mount so Linux does not read host obj paths (obj\Debug).
+      - /app/src/App.Host/obj
+      - /app/src/App.Host/bin
     working_dir: /app
     ports:
       - "${APP_PORT}:8080"

@@ -4,6 +4,7 @@ using Core.Service.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Core.Service.Migrations
 {
     [DbContext(typeof(SystemDbContext))]
-    partial class SystemDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260924144234_ChangeWalletIdToLong")]
+    partial class ChangeWalletIdToLong
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -29,6 +32,12 @@ namespace Core.Service.Migrations
                         .HasColumnType("bigint");
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("AccountId")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(50)");
 
                     b.Property<decimal>("Balance")
                         .HasPrecision(18, 4)
@@ -54,6 +63,10 @@ namespace Core.Service.Migrations
                         .HasColumnType("datetime2");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "Currency")
+                        .IsUnique()
+                        .HasDatabaseName("UX_AccountWallets_AccountId_Currency");
 
                     b.ToTable("AccountWallets", (string)null);
                 });
@@ -90,53 +103,6 @@ namespace Core.Service.Migrations
                         .HasDatabaseName("UX_CurrencyValues_Code_RateDate");
 
                     b.ToTable("CurrencyValues", (string)null);
-                });
-
-            modelBuilder.Entity("Core.Service.Entities.IdempotencyRecord", b =>
-                {
-                    b.Property<string>("Key")
-                        .HasMaxLength(100)
-                        .IsUnicode(false)
-                        .HasColumnType("varchar(100)");
-
-                    b.Property<decimal>("Balance")
-                        .HasPrecision(18, 4)
-                        .HasColumnType("decimal(18,4)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("Currency")
-                        .IsRequired()
-                        .HasMaxLength(3)
-                        .IsUnicode(false)
-                        .HasColumnType("char(3)")
-                        .IsFixedLength();
-
-                    b.Property<string>("RequestHash")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .IsUnicode(false)
-                        .HasColumnType("char(64)")
-                        .IsFixedLength();
-
-                    b.Property<long>("WalletId")
-                        .HasColumnType("bigint");
-
-                    b.HasKey("Key");
-
-                    b.HasIndex("WalletId");
-
-                    b.ToTable("IdempotencyRecords", (string)null);
-                });
-
-            modelBuilder.Entity("Core.Service.Entities.IdempotencyRecord", b =>
-                {
-                    b.HasOne("Core.Service.Entities.AccountWallet", null)
-                        .WithMany()
-                        .HasForeignKey("WalletId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
                 });
 #pragma warning restore 612, 618
         }
