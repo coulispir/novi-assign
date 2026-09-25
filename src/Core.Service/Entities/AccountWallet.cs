@@ -1,12 +1,10 @@
 using System;
-using Core.Service.Enums;
 
 namespace Core.Service.Entities;
 
 public class AccountWallet
 {
-    public Guid Id { get; private set; }
-    public string AccountId { get; private set; } = string.Empty;
+    public long Id { get; private set; }
     public string Currency { get; private set; } = string.Empty;
     public decimal Balance { get; private set; }
     public byte[] RowVersion { get; private set; } = Array.Empty<byte>(); // RowVersion column used for optimistic concurrency protection
@@ -15,11 +13,8 @@ public class AccountWallet
 
     private AccountWallet() { }
 
-    public static AccountWallet Create(string accountId, string currency, decimal initialBalance = 0)
+    public static AccountWallet Create(string currency, decimal initialBalance = 0)
     {
-        if (string.IsNullOrWhiteSpace(accountId))
-            throw new ArgumentException("Account ID cannot be empty.", nameof(accountId));
-
         if (string.IsNullOrWhiteSpace(currency) || currency.Length != 3)
             throw new ArgumentException("Currency must be a valid 3-letter ISO code.", nameof(currency));
 
@@ -28,8 +23,6 @@ public class AccountWallet
 
         return new AccountWallet
         {
-            Id = Guid.NewGuid(),
-            AccountId = accountId.Trim(),
             Currency = currency.ToUpperInvariant(),
             Balance = initialBalance,
             CreatedAt = DateTime.UtcNow,
@@ -55,6 +48,15 @@ public class AccountWallet
             throw new InvalidOperationException("Insufficient funds to complete this transaction.");
 
         Balance -= amount;
+        UpdatedAt = DateTime.UtcNow;
+    }
+
+    public void ForceDebit(decimal amount)
+    {
+        if (amount <= 0)
+            throw new ArgumentException("Force debit amount must be positive.", nameof(amount));
+
+        Balance -= amount; // Bypasses the negative check protection rule intentionally
         UpdatedAt = DateTime.UtcNow;
     }
 }

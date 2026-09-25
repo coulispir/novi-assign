@@ -11,6 +11,7 @@ public class SystemDbContext : DbContext
 
     public DbSet<AccountWallet> AccountWallets => Set<AccountWallet>();
     public DbSet<CurrencyValue> CurrencyValues => Set<CurrencyValue>();
+    public DbSet<IdempotencyRecord> IdempotencyRecords => Set<IdempotencyRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
