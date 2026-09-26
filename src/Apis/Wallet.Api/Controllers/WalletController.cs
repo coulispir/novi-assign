@@ -1,12 +1,15 @@
 using System;
-using System.ComponentModel.DataAnnotations;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
 using System.Threading;
 using System.Threading.Tasks;
+
 using Core.Service.Exceptions;
 using Core.Service.Handlers;
+
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+
 using Wallet.Api.Models;
 
 namespace Wallet.Api.Controllers;

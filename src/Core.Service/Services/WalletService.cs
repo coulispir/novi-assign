@@ -6,11 +6,13 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+
 using Core.Service.Data;
 using Core.Service.Entities;
 using Core.Service.Exceptions;
 using Core.Service.Repositories;
 using Core.Service.Strategies;
+
 using Microsoft.EntityFrameworkCore;
 
 namespace Core.Service.Services;
@@ -109,7 +111,7 @@ public class WalletService : IWalletService
         }
 
         string upperTarget = targetCurrency.ToUpperInvariant();
-        
+
         var rates = await _dbContext.CurrencyValues
             .Where(r => r.CurrencyCode == wallet.Currency || r.CurrencyCode == upperTarget)
             .OrderByDescending(r => r.RateDate)

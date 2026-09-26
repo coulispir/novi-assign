@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+
 using Core.Service.Entities;
 using Core.Service.Services;
 
@@ -46,7 +47,7 @@ public class WalletHandler : IWalletHandler
     public async ValueTask<BalanceDisplayResult> HandleQueryAsync(GetBalanceQuery query, CancellationToken cancellationToken)
     {
         var result = await _walletService.GetConvertedBalanceAsync(query.WalletId, query.TargetCurrency, cancellationToken);
-        
+
         return new BalanceDisplayResult(
             WalletId: result.Wallet.Id,
             OriginalBalance: result.Wallet.Balance,

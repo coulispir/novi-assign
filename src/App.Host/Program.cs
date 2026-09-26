@@ -1,11 +1,13 @@
 using System;
 using System.Threading.Tasks;
+
 using Core.Service.Data;
-using Core.Service.Interfaces;
 using Core.Service.Handlers;
+using Core.Service.Interfaces;
 using Core.Service.Jobs;
 using Core.Service.Repositories;
 using Core.Service.Services;
+
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
@@ -13,7 +15,9 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+
 using Quartz;
+
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -46,7 +50,7 @@ builder.Services.AddDbContext<SystemDbContext>(options =>
             maxRetryCount: 5,
             maxRetryDelay: TimeSpan.FromSeconds(10),
             errorNumbersToAdd: null);
-            
+
         // Tell EF Core that migrations live inside the Core.Service assembly, not here
         sqlOptions.MigrationsAssembly("Core.Service");
     }));
@@ -130,7 +134,7 @@ static async Task ApplyDatabaseMigrationsAsync(WebApplication app)
     using var scope = app.Services.CreateScope();
     var services = scope.ServiceProvider;
     var logger = services.GetRequiredService<ILogger<Program>>();
-    
+
     try
     {
         logger.LogInformation("Checking database state and applying migrations...");
@@ -140,7 +144,7 @@ static async Task ApplyDatabaseMigrationsAsync(WebApplication app)
         // so EF cannot auto-create FinancialSystemDb. Create it via master first, then migrate.
         await EnsureDatabaseExistsAsync(context.Database.GetConnectionString()
             ?? throw new InvalidOperationException("Database connection string is missing."));
-        
+
         // This will block execution until the SQL Server container accepts the schema,
         // matching the health check lifecycle setup inside your Docker Compose file.
         await context.Database.MigrateAsync();
