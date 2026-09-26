@@ -7,7 +7,8 @@ public class SubtractFundsStrategy : IBalanceStrategy
 {
     public string Name => "SubtractFundsStrategy";
 
-    public void Apply(AccountWallet wallet, decimal amount){
+    public void Apply(AccountWallet wallet, decimal amount)
+    {
         // Check balance bounds manually first to throw your dedicated domain exception shape
         if (wallet.Balance - amount < 0)
         {

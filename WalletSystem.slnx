@@ -5,7 +5,6 @@
     <Project Path="src/Ecb.Gateway/Ecb.Gateway.csproj" />
   </Folder>
   <Folder Name="/src/Apis/">
-    <Project Path="src/Apis/Exchange.Api/Exchange.Api.csproj" />
     <Project Path="src/Apis/Wallet.Api/Wallet.Api.csproj" />
   </Folder>
   <Folder Name="/tests/">

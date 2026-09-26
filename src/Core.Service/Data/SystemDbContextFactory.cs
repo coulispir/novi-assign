@@ -1,4 +1,5 @@
 using System;
+
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 
@@ -9,7 +10,7 @@ public class SystemDbContextFactory : IDesignTimeDbContextFactory<SystemDbContex
     public SystemDbContext CreateDbContext(string[] args)
     {
         var optionsBuilder = new DbContextOptionsBuilder<SystemDbContext>();
-        
+
         // Local fallback string used strictly for design-time file generation tasks.
         // This does not affect your production runtime docker environment values.
         const string localFallbackConnectionString = "Server=127.0.0.1;Database=FinancialSystemDb;User Id=sa;Password=YourSecure@Password123;TrustServerCertificate=True;";

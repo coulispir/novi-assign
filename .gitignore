@@ -27,3 +27,7 @@ Thumbs.db
 
 # Local secrets
 .env
+
+# Serilog file sink
+logs/
+

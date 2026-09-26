@@ -6,6 +6,7 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
+
 using Core.Service.Interfaces;
 using Core.Service.Models;
 
@@ -29,7 +30,7 @@ public class EcbGateway : IEcbGateway
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        
+
         // 2. Parse into a memory document tree natively
         var document = await XDocument.LoadAsync(stream, LoadOptions.None, cancellationToken);
         var results = new List<EcbRateResult>();
@@ -38,7 +39,7 @@ public class EcbGateway : IEcbGateway
         // Example parent layout block: <Cube time="2026-09-23">
         var timeCube = document.Descendants(Namespace + "Cube").First(x => x.Attribute("time") != null);
         var dateString = timeCube.Attribute("time")?.Value;
-        
+
         if (!DateTime.TryParseExact(dateString, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var rateDate))
         {
             rateDate = DateTime.UtcNow.Date;

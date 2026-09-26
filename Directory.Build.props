@@ -1,0 +1,20 @@
+<Project>
+  <PropertyGroup>
+    <!-- 1. Enforce strict code quality, security, and performance rules -->
+    <AnalysisMode>All</AnalysisMode>
+    <AnalysisLevel>latest-strict</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    
+    <!-- 2. Treat Warnings as Errors: Proves zero code leaks on compilation -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    
+    <!-- 3. Fail build if risky nullable scenarios are explicitly bypassed -->
+    <WarningsAsErrors>$(WarningsAsErrors);CS8600;CS8602;CS8603</WarningsAsErrors>
+  </PropertyGroup>
+
+  <!-- Your existing setup for logging abstractions -->
+  <!-- Class libraries log through ILogger. Web projects already get that type from ASP.NET, and the host binds Serilog. -->
+  <ItemGroup Condition="!$(MSBuildProjectDirectory.Contains('tests')) AND '$(UsingMicrosoftNETSdkWeb)' != 'true' AND !$(MSBuildProjectDirectory.Contains('Wallet.Api'))">
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+</Project>
