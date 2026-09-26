@@ -1,0 +1,6 @@
+<Project>
+  <!-- Class libraries log through ILogger. Web projects already get that type from ASP.NET, and the host binds Serilog. -->
+  <ItemGroup Condition="!$(MSBuildProjectDirectory.Contains('tests')) AND '$(UsingMicrosoftNETSdkWeb)' != 'true' AND !$(MSBuildProjectDirectory.Contains('Wallet.Api'))">
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+</Project>

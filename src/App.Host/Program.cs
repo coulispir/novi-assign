@@ -14,8 +14,14 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Quartz;
+using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Host.UseSerilog((context, services, configuration) => configuration
+    .ReadFrom.Configuration(context.Configuration)
+    .ReadFrom.Services(services)
+    .Enrich.FromLogContext());
 
 // Fetch connection string securely injected by Docker Compose
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
@@ -91,8 +97,7 @@ builder.Services.AddQuartzHostedService(options => options.WaitForJobsToComplete
 
 // Add API Routing Controllers capability and dynamically discover external modules
 builder.Services.AddControllers()
-    .AddApplicationPart(typeof(Wallet.Api.AssemblyReference).Assembly)
-    .AddApplicationPart(typeof(Exchange.Api.AssemblyReference).Assembly);
+    .AddApplicationPart(typeof(Wallet.Api.AssemblyReference).Assembly);
 
 var app = builder.Build();
 
@@ -102,6 +107,7 @@ if (app.Environment.IsDevelopment())
     app.UseDeveloperExceptionPage();
 }
 
+app.UseSerilogRequestLogging();
 app.UseRouting();
 app.MapControllers();
 
@@ -109,7 +115,14 @@ app.MapControllers();
 // Creates database and applies migrations on startup if they don't exist yet
 await ApplyDatabaseMigrationsAsync(app);
 
-app.Run();
+try
+{
+    app.Run();
+}
+finally
+{
+    Log.CloseAndFlush();
+}
 
 // Scoped lifecycle management method for database migrations
 static async Task ApplyDatabaseMigrationsAsync(WebApplication app)
