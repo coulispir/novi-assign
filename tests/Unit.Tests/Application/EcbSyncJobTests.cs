@@ -16,7 +16,7 @@ using NSubstitute.ExceptionExtensions;
 
 using Quartz;
 
-namespace Unit.Tests.Jobs;
+namespace Unit.Tests.Application;
 
 public sealed class EcbSyncJobTests
 {
@@ -30,7 +30,7 @@ public sealed class EcbSyncJobTests
     }
 
     [Fact]
-    public async Task RefreshesTheCacheAfterSavingTheSyncedRates()
+    public async Task Execute_AfterSuccessfulSync_RefreshesTheCache()
     {
         _ecbRatesService.SyncLatestRatesAsync(Arg.Any<CancellationToken>()).Returns(new EcbSyncSummary(31, 0, 0));
 
@@ -44,7 +44,7 @@ public sealed class EcbSyncJobTests
     }
 
     [Fact]
-    public async Task LeavesTheCacheUntouchedWhenTheSyncFails()
+    public async Task Execute_WhenSyncFails_LeavesTheCacheUntouched()
     {
         _ecbRatesService.SyncLatestRatesAsync(Arg.Any<CancellationToken>()).ThrowsAsync(new HttpRequestException("ECB is down"));
 

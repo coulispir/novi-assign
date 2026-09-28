@@ -8,6 +8,7 @@
     <Project Path="src/Apis/Wallet.Api/Wallet.Api.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Functional.Tests/Functional.Tests.csproj" />
     <Project Path="tests/Integration.Tests/Integration.Tests.csproj" />
     <Project Path="tests/Unit.Tests/Unit.Tests.csproj" />
   </Folder>
