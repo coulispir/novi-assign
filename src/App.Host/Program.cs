@@ -1,6 +1,9 @@
 using System;
 using System.Threading.Tasks;
 
+using App.Host.Infrastructure;
+using App.Host.Infrastructure.RateLimiting;
+
 using Core.Service.Data;
 using Core.Service.Handlers;
 using Core.Service.Interfaces;
@@ -98,6 +101,10 @@ builder.Services.AddQuartz(q =>
 
 builder.Services.AddQuartzHostedService(options => options.WaitForJobsToComplete = true);
 
+// Shared Redis connection, rate limiting backed by it, and real client IP resolution behind load balancers
+builder.Services.AddRedis(builder.Configuration);
+builder.Services.AddTrustedForwardedHeaders(builder.Configuration);
+builder.Services.AddClientIpRateLimiting(builder.Configuration, Wallet.Api.RateLimitPolicies.All);
 
 // Add API Routing Controllers capability and dynamically discover external modules
 builder.Services.AddControllers()
@@ -111,8 +118,13 @@ if (app.Environment.IsDevelopment())
     app.UseDeveloperExceptionPage();
 }
 
+// Must run first so logging and rate limiting see the real client IP rather than the load balancer's
+app.UseForwardedHeaders();
 app.UseSerilogRequestLogging();
 app.UseRouting();
+
+// After routing, so endpoint-specific policies ([EnableRateLimiting]) are resolved
+app.UseRateLimiter();
 app.MapControllers();
 
 // AUTOMATED DB INITIALIZATION AUTOMATION
@@ -174,5 +186,14 @@ static async Task EnsureDatabaseExistsAsync(string applicationConnectionString)
     await connection.OpenAsync();
     await using var command = connection.CreateCommand();
     command.CommandText = $"IF DB_ID(N'{sanitizedName}') IS NULL CREATE DATABASE [{sanitizedName}];";
-    await command.ExecuteNonQueryAsync();
+
+    const int DatabaseAlreadyExistsError = 1801;
+    try
+    {
+        await command.ExecuteNonQueryAsync();
+    }
+    catch (SqlException ex) when (ex.Number == DatabaseAlreadyExistsError)
+    {
+        // Another replica starting at the same time created it between our check and CREATE; nothing left to do
+    }
 }
