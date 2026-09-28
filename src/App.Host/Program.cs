@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 
 using App.Host.Infrastructure;
+using App.Host.Infrastructure.Caching;
 using App.Host.Infrastructure.RateLimiting;
 
 using Core.Service.Data;
@@ -30,13 +31,8 @@ builder.Host.UseSerilog((context, services, configuration) => configuration
     .ReadFrom.Services(services)
     .Enrich.FromLogContext());
 
-// Fetch connection string securely injected by Docker Compose
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
-
-if (string.IsNullOrEmpty(connectionString))
-{
-    throw new InvalidOperationException("Database connection string 'DefaultConnection' is missing from configuration.");
-}
+// Injected through environment variables (Docker Compose locally, a secret store in production)
+var connectionString = builder.Configuration.GetRequiredConnectionString("DefaultConnection");
 
 // Strategies are stateless; they must share the factory's singleton lifetime
 builder.Services.AddSingleton<Core.Service.Strategies.IBalanceStrategy, Core.Service.Strategies.AddFundsStrategy>();
@@ -67,6 +63,7 @@ builder.Services.AddHttpClient<IEcbGateway, Ecb.Gateway.Services.EcbGateway>(cli
 
 // Register application services and data repositories
 builder.Services.AddScoped<ICurrencyValueRepository, CurrencyValueRepository>();
+builder.Services.AddScoped<ICurrencyRatesProvider, CurrencyRatesProvider>();
 builder.Services.AddScoped<IEcbRatesService, EcbRatesService>();
 builder.Services.AddScoped<IWalletRepository, WalletRepository>();
 builder.Services.AddScoped<IWalletService, WalletService>();
@@ -101,8 +98,9 @@ builder.Services.AddQuartz(q =>
 
 builder.Services.AddQuartzHostedService(options => options.WaitForJobsToComplete = true);
 
-// Shared Redis connection, rate limiting backed by it, and real client IP resolution behind load balancers
+// Shared Redis connection, the currency rates cache and rate limiting backed by it, and real client IP resolution behind load balancers
 builder.Services.AddRedis(builder.Configuration);
+builder.Services.AddCurrencyRatesCache(builder.Configuration);
 builder.Services.AddTrustedForwardedHeaders(builder.Configuration);
 builder.Services.AddClientIpRateLimiting(builder.Configuration, Wallet.Api.RateLimitPolicies.All);
 

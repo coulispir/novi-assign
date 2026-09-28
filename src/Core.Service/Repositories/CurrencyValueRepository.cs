@@ -28,6 +28,21 @@ public class CurrencyValueRepository : ICurrencyValueRepository
             .ToListAsync(cancellationToken);
     }
 
+    public async Task<IReadOnlyDictionary<string, decimal>> GetLatestRatesAsync(CancellationToken cancellationToken = default)
+    {
+        // A currency the ECB stops publishing keeps its last known rate, so pick the latest date per currency
+        // rather than the latest date overall. Served by the (CurrencyCode, RateDate) unique index.
+        var latestRates = await _dbContext.CurrencyValues
+            .AsNoTracking()
+            .Where(c => c.RateDate == _dbContext.CurrencyValues
+                .Where(other => other.CurrencyCode == c.CurrencyCode)
+                .Max(other => other.RateDate))
+            .Select(c => new { c.CurrencyCode, c.Rate })
+            .ToListAsync(cancellationToken);
+
+        return latestRates.ToDictionary(c => c.CurrencyCode, c => c.Rate, StringComparer.OrdinalIgnoreCase);
+    }
+
     public void AddRange(IEnumerable<CurrencyValue> currencyValues)
     {
         _dbContext.CurrencyValues.AddRange(currencyValues);
