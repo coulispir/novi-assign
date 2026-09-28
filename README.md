@@ -147,25 +147,52 @@ GET /api/wallets/{id}?currency=X ──► Redis ──hit──► convert
 ## Tests
 
 ```bash
-dotnet test
+dotnet test                                # everything; Docker must be running
+dotnet test tests/Unit.Tests               # unit tests only: no Docker, well under a second
 ```
 
-The integration tests in [tests/Integration.Tests](tests/Integration.Tests) start a real Redis container with [Testcontainers](https://dotnet.testcontainers.org/), so **Docker must be running**.
+The tests follow the layers of the code, and each layer is tested with the lightest setup that can still catch its bugs:
 
-The rate limiting tests host the real `WalletController` in memory with the production rate limiting setup and a mocked handler, so no database is needed. They cover:
+| Project | What it tests | Real dependencies |
+|---|---|---|
+| [Unit.Tests/Domain](tests/Unit.Tests/Domain) | Entities and balance strategies: validation, balance rules | none, and no mocks |
+| [Unit.Tests/Application](tests/Unit.Tests/Application) | Handler, services and sync job: coordination and business logic | none; ports mocked with NSubstitute |
+| [Integration.Tests](tests/Integration.Tests) | Infrastructure adapters: Redis cache, rate limiting, ECB feed parsing, startup validation | Redis ([Testcontainers](https://dotnet.testcontainers.org/)); HTTP stubbed |
+| [Functional.Tests](tests/Functional.Tests) | The API end to end, through `WebApplicationFactory<Program>` | SQL Server and Redis containers; only the ECB feed is faked |
 
-- the 429 response
-- per-endpoint limits
-- shared budgets across route values and across two app nodes
-- atomicity under 50 concurrent requests
-- trusted and spoofed `X-Forwarded-For`
-- IPv6 `/64` grouping
-- failing open when Redis is down
-- startup validation
+### Unit tests
 
-The currency rates cache tests run the production cache registrations against the same Redis. They cover exact decimal round-trips, atomic replacement that drops removed currencies, the conditional read-through fill never overwriting a fresher snapshot, the TTL, unreadable data, failing open when Redis is down, and startup validation.
+- **Domain:** wallet creation and credit/debit/force-debit rules, currency rate validation, each balance strategy, and strategy lookup.
+- **Application:**
+  - the ECB upsert (insert, update, skip unchanged, de-duplicate, empty feed);
+  - conversion maths through EUR, including rounding;
+  - handler input validation;
+  - cache-aside reads;
+  - the job refreshing the cache only after a successful sync.
+- Names follow `Method_Scenario_Result`.
 
-The unit tests in [tests/Unit.Tests](tests/Unit.Tests) cover the cache-aside logic in `CurrencyRatesProvider` and check that `EcbSyncJob` refreshes the cache only after a successful sync.
+### Integration tests
+
+- **Rate limiting** hosts the real `WalletController` with the production rate limiting setup and a mocked handler. It covers the 429 response, per-endpoint limits, shared budgets across route values and across two app nodes, atomicity under 50 concurrent requests, trusted and spoofed `X-Forwarded-For`, IPv6 `/64` grouping, and failing open when Redis is down.
+- **Currency rates cache** runs the production cache registrations against Redis. It covers exact decimal round-trips, atomic replacement, the conditional read-through fill, the TTL, unreadable data, and failing open.
+- **ECB gateway** parses canned feed responses: every rate plus the EUR base, malformed entries, parsing independent of culture, and error statuses.
+- **Startup validation** checks that bad trusted-proxy settings and missing connection strings stop the host.
+
+### Functional tests
+
+These boot the real `Program.cs` (DI, middleware, migrations) against real SQL Server and Redis containers:
+
+- **Wallet lifecycle:** create, read, each strategy, and every 400 and 404 path. Failed requests leave the balance unchanged.
+- **Idempotency and concurrency:** replays, key reuse with a different request (422), parallel retries with the same key applied exactly once, and parallel adjustments never losing an update.
+- **Currency conversion:** the full path from ECB feed to sync job, SQL Server, Redis and the endpoint. Also: rates are served from Redis rather than SQL Server, an empty cache falls back to the database and refills, new rates are served after a sync, and a currency the ECB drops keeps its last rate.
+
+A few design choices keep these tests reliable:
+
+- **Real SQL Server, not EF Core's in-memory provider.** Idempotency and lost-update protection depend on SQL Server enforcing the wallet row version and the idempotency key's primary key. The in-memory provider doesn't enforce those, so these tests would pass there even with the protections broken.
+- **The Quartz scheduler doesn't run.** Tests call the real `EcbSyncJob` when they need a sync, instead of racing a background trigger.
+- **Tests never depend on each other's data.** Each creates its own wallets, and each test that changes rates owns one currency (see [FakeEcbFeed](tests/Functional.Tests/Infrastructure/FakeEcbFeed.cs)). No database reset is needed between tests.
+- **The tests keep their own copies of the response contracts**, so renaming an API property breaks them the same way it would break clients.
+- **Test logs go to the test project's `bin/.../logs/`**, not `src/App.Host/logs`.
 
 ## Production considerations
 

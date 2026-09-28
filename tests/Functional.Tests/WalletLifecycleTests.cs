@@ -1,0 +1,111 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Threading.Tasks;
+
+using FluentAssertions;
+
+using Functional.Tests.Infrastructure;
+
+namespace Functional.Tests;
+
+[Collection(WalletApiCollection.Name)]
+public sealed class WalletLifecycleTests
+{
+    private readonly WalletApiClient _api;
+
+    public WalletLifecycleTests(WalletApiFactory factory)
+    {
+        _api = new WalletApiClient(factory.CreateClient());
+    }
+
+    [Fact]
+    public async Task CreatesAWalletAndReadsItBack()
+    {
+        var created = await _api.CreateWalletAsync("eur", 100m);
+
+        created.Id.Should().BePositive();
+        created.Currency.Should().Be("EUR");
+        created.Balance.Should().Be(100m);
+
+        var balance = await _api.GetBalanceAsync(created.Id);
+        balance.Should().Be(new BalanceDto(created.Id, 100m, "EUR", 100m, "EUR"));
+    }
+
+    [Theory]
+    [InlineData("EURO", 10)]
+    [InlineData("EUR", -1)]
+    public async Task RejectsAnInvalidWallet(string currency, decimal initialBalance)
+    {
+        using var response = await _api.CreateAsync(currency, initialBalance);
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await response.Content.ReadFromJsonAsync<ErrorDto>())!.Error.Should().NotBeNullOrWhiteSpace();
+    }
+
+    [Fact]
+    public async Task ReturnsNotFoundForAnUnknownWallet()
+    {
+        using var response = await _api.GetAsync(long.MaxValue);
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task AppliesEachStrategyAndPersistsTheBalance()
+    {
+        var wallet = await _api.CreateWalletAsync("EUR", 100m);
+
+        await AssertAdjustedAsync(wallet.Id, 50m, "AddFundsStrategy", expectedBalance: 150m);
+        await AssertAdjustedAsync(wallet.Id, 30m, "SubtractFundsStrategy", expectedBalance: 120m);
+        await AssertAdjustedAsync(wallet.Id, 200m, "ForceSubtractFundsStrategy", expectedBalance: -80m);
+
+        (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(-80m);
+    }
+
+    [Fact]
+    public async Task RejectsASubtractionBeyondTheBalanceWithoutChangingIt()
+    {
+        var wallet = await _api.CreateWalletAsync("EUR", 20m);
+
+        using var response = await _api.AdjustAsync(wallet.Id, 20.01m, "EUR", "SubtractFundsStrategy");
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(20m);
+    }
+
+    public static TheoryData<decimal, string, string, string?> InvalidAdjustments => new()
+    {
+        { 10m, "USD", "AddFundsStrategy", WalletApiClient.NewIdempotencyKey() },   // currency differs from the wallet's
+        { 10m, "EUR", "TransferStrategy", WalletApiClient.NewIdempotencyKey() },   // unknown strategy
+        { 0m, "EUR", "AddFundsStrategy", WalletApiClient.NewIdempotencyKey() },    // non-positive amount
+        { 10m, "EUR", "AddFundsStrategy", null },                                  // missing Idempotency-Key
+    };
+
+    [Theory]
+    [MemberData(nameof(InvalidAdjustments))]
+    public async Task RejectsAnInvalidAdjustmentWithoutChangingTheBalance(decimal amount, string currency, string strategy, string? idempotencyKey)
+    {
+        var wallet = await _api.CreateWalletAsync("EUR", 20m);
+
+        using var response = await _api.AdjustAsync(wallet.Id, amount, currency, strategy, idempotencyKey);
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(20m);
+    }
+
+    [Fact]
+    public async Task ReturnsNotFoundWhenAdjustingAnUnknownWallet()
+    {
+        using var response = await _api.AdjustAsync(long.MaxValue, 10m, "EUR", "AddFundsStrategy");
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    private async Task AssertAdjustedAsync(long walletId, decimal amount, string strategy, decimal expectedBalance)
+    {
+        using var response = await _api.AdjustAsync(walletId, amount, "EUR", strategy);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await response.Content.ReadFromJsonAsync<WalletDto>()).Should().Be(new WalletDto(walletId, "EUR", expectedBalance));
+    }
+}

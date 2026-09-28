@@ -11,7 +11,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 using NSubstitute;
 
-namespace Unit.Tests.Services;
+namespace Unit.Tests.Application;
 
 public sealed class CurrencyRatesProviderTests
 {
@@ -29,7 +29,7 @@ public sealed class CurrencyRatesProviderTests
     }
 
     [Fact]
-    public async Task ServesCachedRatesWithoutQueryingTheDatabase()
+    public async Task GetLatestRatesAsync_OnCacheHit_ServesCachedRatesWithoutQueryingTheDatabase()
     {
         _cache.GetAsync().Returns(CachedRates);
 
@@ -40,7 +40,7 @@ public sealed class CurrencyRatesProviderTests
     }
 
     [Fact]
-    public async Task OnACacheMissReadsTheDatabaseAndFillsTheCacheOnlyIfStillEmpty()
+    public async Task GetLatestRatesAsync_OnCacheMiss_ReadsTheDatabaseAndFillsTheCacheOnlyIfStillEmpty()
     {
         _cache.GetAsync().Returns((IReadOnlyDictionary<string, decimal>?)null);
         _repository.GetLatestRatesAsync(Arg.Any<CancellationToken>()).Returns(DatabaseRates);
@@ -53,7 +53,7 @@ public sealed class CurrencyRatesProviderTests
     }
 
     [Fact]
-    public async Task DoesNotCacheAnEmptyDatabase()
+    public async Task GetLatestRatesAsync_WithEmptyDatabase_DoesNotCacheAnything()
     {
         _cache.GetAsync().Returns((IReadOnlyDictionary<string, decimal>?)null);
         _repository.GetLatestRatesAsync(Arg.Any<CancellationToken>()).Returns(NoRates);
@@ -65,7 +65,7 @@ public sealed class CurrencyRatesProviderTests
     }
 
     [Fact]
-    public async Task RefreshReplacesTheCachedSnapshotWithTheLatestDatabaseRates()
+    public async Task RefreshCacheAsync_WithStoredRates_ReplacesTheCachedSnapshot()
     {
         _repository.GetLatestRatesAsync(Arg.Any<CancellationToken>()).Returns(DatabaseRates);
         _cache.ReplaceAsync(DatabaseRates).Returns(true);
@@ -77,7 +77,7 @@ public sealed class CurrencyRatesProviderTests
     }
 
     [Fact]
-    public async Task RefreshReportsFailureWhenTheCacheIsUnavailable()
+    public async Task RefreshCacheAsync_WhenCacheIsUnavailable_ReturnsFalse()
     {
         _repository.GetLatestRatesAsync(Arg.Any<CancellationToken>()).Returns(DatabaseRates);
         _cache.ReplaceAsync(DatabaseRates).Returns(false);
@@ -86,7 +86,7 @@ public sealed class CurrencyRatesProviderTests
     }
 
     [Fact]
-    public async Task RefreshSkipsTheCacheWhenNoRatesAreStored()
+    public async Task RefreshCacheAsync_WithNoStoredRates_SkipsTheCache()
     {
         _repository.GetLatestRatesAsync(Arg.Any<CancellationToken>()).Returns(NoRates);
 
