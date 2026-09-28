@@ -9,6 +9,7 @@ using Core.Service.Handlers;
 
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 using Wallet.Api.Models;
 
@@ -16,6 +17,7 @@ namespace Wallet.Api.Controllers;
 
 [ApiController]
 [Route("api/wallets")] // Hardcoded lowercase route ensures stable mapping inside Linux containers
+[ProducesResponseType(StatusCodes.Status429TooManyRequests)]
 public class WalletController : ControllerBase
 {
     private const string IdempotencyKeyHeader = "Idempotency-Key";
@@ -31,6 +33,7 @@ public class WalletController : ControllerBase
     // 📥 1. CREATE WALLET ENDPOINT
     // POST /api/wallets
     [HttpPost]
+    [EnableRateLimiting(RateLimitPolicies.WalletCreate)]
     [ProducesResponseType(StatusCodes.Status201Created, Type = typeof(WalletResponse))]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<IActionResult> CreateWallet([FromBody] CreateWalletPayload payload, CancellationToken cancellationToken)
@@ -50,6 +53,7 @@ public class WalletController : ControllerBase
     // 📤 2. RETRIEVE WALLET BALANCE (WITH CURRENCY CONVERSION HINT)
     // GET /api/wallets/{walletId}?currency=USD
     [HttpGet("{walletId:long}")]
+    [EnableRateLimiting(RateLimitPolicies.WalletRead)]
     [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(BalanceDisplayResult))]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -75,6 +79,7 @@ public class WalletController : ControllerBase
     // POST /api/wallets/{walletId}/adjustbalance?amount=50&currency=EUR&strategy=SubtractFundsStrategy
     // Header: Idempotency-Key: <client-generated unique value, e.g. a UUID>
     [HttpPost("{walletId:long}/adjustbalance")]
+    [EnableRateLimiting(RateLimitPolicies.WalletAdjust)]
     [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(WalletResponse))]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

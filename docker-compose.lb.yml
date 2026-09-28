@@ -1,0 +1,46 @@
+# Production-like topology layered on top of docker-compose.yml:
+# nginx load balancer -> two API replicas built from the Dockerfile -> shared SQL Server and Redis.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.lb.yml up -d --build
+#
+# Switch back to the hot-reload setup with: docker compose up -d --remove-orphans
+
+services:
+  webapi:
+    build: .
+    image: novi-assign-webapi
+    # Replicas need generated names, no host port (nginx is the only entry point) and the image's own entrypoint
+    container_name: !reset null
+    ports: !reset []
+    volumes: !reset []
+    working_dir: !reset null
+    command: !reset null
+    deploy:
+      replicas: 2
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      # Trust X-Forwarded-For only from nginx; any other sender could spoof its IP
+      - ForwardedHeaders__KnownProxies__0=172.28.0.10
+    networks:
+      - default
+      - edge
+
+  nginx:
+    image: nginx:1.29-alpine
+    container_name: nginx-lb-container
+    ports:
+      - "${APP_PORT}:80"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - webapi
+    networks:
+      edge:
+        ipv4_address: 172.28.0.10
+
+networks:
+  # Load balancer <-> API traffic, with a fixed address for nginx so the API can trust exactly that proxy
+  edge:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
