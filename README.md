@@ -1,6 +1,6 @@
 # novi-assign
 
-Wallet management API (ASP.NET Core, .NET 10) backed by SQL Server, with ECB exchange rate synchronisation via Quartz and per-client rate limiting via Redis.
+Wallet management API (ASP.NET Core, .NET 10) backed by SQL Server, with ECB exchange rate synchronisation via Quartz, a Redis cache of the latest rates, and per-client rate limiting via Redis.
 
 ## Running locally
 
@@ -102,10 +102,47 @@ The real client IP is read from `X-Forwarded-For`, **but only when the request c
 - `KnownProxies` takes single addresses and `KnownNetworks` takes CIDR ranges.
 - `ForwardLimit` is the number of proxy hops in front of the app.
 - Until the load balancer is listed, the app sees the load balancer's IP, so all clients share one budget.
+- The app refuses to start if an entry isn't a valid address or CIDR range, or `ForwardLimit` is below 1.
 
 ### Redis
 
-The Redis connection string is `ConnectionStrings:Redis`, set to `redis:6379` in Docker Compose. One shared `IConnectionMultiplexer` is registered in [RedisServiceCollectionExtensions.cs](src/App.Host/Infrastructure/RedisServiceCollectionExtensions.cs); other Redis features (such as caching) should reuse it rather than open a second connection.
+The Redis connection string is `ConnectionStrings:Redis`, set to `redis:6379` in Docker Compose. One shared `IConnectionMultiplexer` is registered in [RedisServiceCollectionExtensions.cs](src/App.Host/Infrastructure/RedisServiceCollectionExtensions.cs). Rate limiting and the [currency rates cache](#currency-rates-cache) both use it, and any new Redis feature should too, rather than open a second connection.
+
+## Currency rates cache
+
+Currency conversion (`GET /api/wallets/{walletId}?currency=USD`) reads exchange rates from Redis, not from SQL Server. The database is only queried when the cache is empty or unreachable.
+
+```
+EcbSyncJob (every minute, one node) ──► SQL Server ──► latest rate per currency ──► Redis (replace snapshot)
+GET /api/wallets/{id}?currency=X ──► Redis ──hit──► convert
+                                        └──miss──► SQL Server ──► fill Redis if still empty ──► convert
+```
+
+### How it works
+
+- **One shared snapshot in Redis, not an in-process cache.** The sync job runs on only one node per trigger, so an in-memory cache would be refreshed on that node and stay stale on every other one. Redis gives all nodes the same rates as soon as the job finishes.
+- **The snapshot is a single hash** at `currency-rates:latest:v1`, mapping each currency code to its latest rate against EUR. Reading it is one `HGETALL` of about 30 small fields. The `v1` suffix lets a future format change roll out without old and new nodes misreading each other's data.
+- **The job refreshes the cache on every run**, right after saving rates to SQL Server, even when no rate changed. The snapshot is rebuilt from the database (the latest rate for each currency), not from the ECB payload, so the cache always matches the database. It is replaced atomically in one `MULTI/EXEC` transaction: readers never see a half-written snapshot, and currencies no longer in the database are dropped. Because every run rewrites it, the cache recovers within one job interval after a Redis restart, eviction or outage.
+- **Cache misses read through, without a race.** On a miss (for example at first startup, before the job has run), the request reads the rates from SQL Server and writes them to Redis **only if the key still doesn't exist** (a `WATCH`-based transaction). If the job writes a fresher snapshot while a request is still reading the database, the request's older data is discarded instead of overwriting it.
+- **Unknown currencies never reach the database.** The snapshot holds every currency, so a currency missing from it has no rate, and the request fails with `400` without a database query.
+- **Fails open.** If Redis is unreachable, requests read rates from SQL Server and a warning is logged (`Currency rates cache is unavailable`), rather than failing. As with rate limiting, Redis commands fail immediately while disconnected, so an outage adds no latency.
+
+### Configuration
+
+```json
+"CurrencyRatesCache": {
+  "TimeToLive": "01:00:00"
+}
+```
+
+- `TimeToLive` is only a safety net, since the job rewrites the snapshot every minute. It makes sure the key never lives forever, and that Redis can evict it under a `volatile-*` `maxmemory` policy. Keep it longer than the job interval, or requests will fall back to the database between runs.
+- The app refuses to start if `TimeToLive` is missing or not positive.
+
+### Code
+
+- [ICurrencyRatesProvider](src/Core.Service/Interfaces/ICurrencyRatesProvider.cs) / [CurrencyRatesProvider](src/Core.Service/Services/CurrencyRatesProvider.cs): the cache-aside read path used by `WalletService`, and the refresh used by `EcbSyncJob`.
+- [ICurrencyRatesCache](src/Core.Service/Interfaces/ICurrencyRatesCache.cs): the cache abstraction, which keeps `Core.Service` free of Redis dependencies.
+- [RedisCurrencyRatesCache](src/App.Host/Infrastructure/Caching/RedisCurrencyRatesCache.cs): the Redis implementation, registered by `AddCurrencyRatesCache`.
 
 ## Tests
 
@@ -113,7 +150,9 @@ The Redis connection string is `ConnectionStrings:Redis`, set to `redis:6379` in
 dotnet test
 ```
 
-The integration tests in [tests/Integration.Tests](tests/Integration.Tests) start a real Redis container with [Testcontainers](https://dotnet.testcontainers.org/), so **Docker must be running**. They host the real `WalletController` in memory with the production rate limiting setup and a mocked handler, so no database is needed. They cover:
+The integration tests in [tests/Integration.Tests](tests/Integration.Tests) start a real Redis container with [Testcontainers](https://dotnet.testcontainers.org/), so **Docker must be running**.
+
+The rate limiting tests host the real `WalletController` in memory with the production rate limiting setup and a mocked handler, so no database is needed. They cover:
 
 - the 429 response
 - per-endpoint limits
@@ -123,6 +162,10 @@ The integration tests in [tests/Integration.Tests](tests/Integration.Tests) star
 - IPv6 `/64` grouping
 - failing open when Redis is down
 - startup validation
+
+The currency rates cache tests run the production cache registrations against the same Redis. They cover exact decimal round-trips, atomic replacement that drops removed currencies, the conditional read-through fill never overwriting a fresher snapshot, the TTL, unreadable data, failing open when Redis is down, and startup validation.
+
+The unit tests in [tests/Unit.Tests](tests/Unit.Tests) cover the cache-aside logic in `CurrencyRatesProvider` and check that `EcbSyncJob` refreshes the cache only after a successful sync.
 
 ## Production considerations
 
@@ -146,7 +189,7 @@ The code is built to run as several replicas behind a load balancer, as the [loa
 
 - **Use a managed, highly available Redis** (e.g. AWS ElastiCache, Azure Cache for Redis, or Sentinel/Cluster). Rate limit keys use hash tags (`rl:fw:{client|endpoint}`), so they work with Redis Cluster.
 - **Enable authentication and TLS** through the connection string, e.g. `my-redis:6380,password=...,ssl=true`.
-- **Memory stays small.** Each active client/endpoint pair uses two small keys, and Redis expires them automatically when their window ends. Set a `maxmemory` policy anyway, especially once caching shares the instance.
+- **Memory stays small.** Each active client/endpoint pair uses two small keys, and Redis expires them automatically when their window ends. The currency rates cache is one hash of about 30 fields. Set a `maxmemory` policy anyway, and prefer `volatile-lru` or `allkeys-lru` over `noeviction`: every key the app writes has a TTL, and a full Redis should evict keys, not reject writes.
 
 ### Deployment
 
@@ -154,3 +197,11 @@ The code is built to run as several replicas behind a load balancer, as the [loa
 - **Keep secrets out of the repo.** Inject connection strings from a secret store (e.g. Key Vault, AWS Secrets Manager, Kubernetes secrets) rather than `.env`, and use a least-privilege SQL login instead of `sa`.
 - **Run migrations as a separate deployment step** rather than at app startup. The app's SQL login then needs no permission to change the schema, and a failed migration stops the deployment instead of crash-looping every replica.
 - **Add health checks** (`/health` covering SQL Server and Redis) for the load balancer and orchestrator.
+
+### Currency rates cache
+
+- **Alert on `Currency rates cache is unavailable`.** Requests keep working through the database fallback, but all conversion traffic then hits SQL Server.
+- **Staleness is bounded by the job interval.** Replicas never disagree on rates, because they all read the same snapshot. After a Redis outage, a snapshot Redis restored from disk is served until the next job run (at most one minute). ECB publishes new rates once a day, so this is well within tolerance.
+- **A cold cache isn't single-flighted.** While the cache is empty (only until the first job run after startup, or after the key is lost), concurrent requests each run the small, indexed "latest rates" query. If conversion traffic grows enough for that to matter, add a per-node single-flight or warm the cache at startup.
+- **An in-process L1 cache is the next step if Redis latency ever matters.** A short-TTL memory cache in front of Redis would remove the network hop, at the cost of each node lagging by up to that TTL. It isn't needed at today's load.
+- **HybridCache was considered and not used.** Its in-memory tier isn't updated on other nodes when the job writes new rates, so nodes could briefly serve different rates.

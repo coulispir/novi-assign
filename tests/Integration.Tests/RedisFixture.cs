@@ -2,11 +2,12 @@ using System.Threading.Tasks;
 
 using Testcontainers.Redis;
 
-namespace Integration.Tests.RateLimiting;
+namespace Integration.Tests;
 
 /// <summary>
 /// Starts one disposable Redis container shared by every test in the <see cref="RedisCollection"/>.
-/// Tests stay isolated by using a unique client IP each, so they never touch each other's counters.
+/// Tests in a collection run one at a time; rate limiting tests stay isolated by using a unique client IP each, and
+/// cache tests reset the key they use before each test.
 /// </summary>
 public sealed class RedisFixture : IAsyncLifetime
 {

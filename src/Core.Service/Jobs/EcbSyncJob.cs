@@ -16,11 +16,13 @@ public class EcbSyncJob : IJob
     public static readonly JobKey Key = new(nameof(EcbSyncJob));
 
     private readonly IEcbRatesService _ecbRatesService;
+    private readonly ICurrencyRatesProvider _currencyRatesProvider;
     private readonly ILogger<EcbSyncJob> _logger;
 
-    public EcbSyncJob(IEcbRatesService ecbRatesService, ILogger<EcbSyncJob> logger)
+    public EcbSyncJob(IEcbRatesService ecbRatesService, ICurrencyRatesProvider currencyRatesProvider, ILogger<EcbSyncJob> logger)
     {
         _ecbRatesService = ecbRatesService;
+        _currencyRatesProvider = currencyRatesProvider;
         _logger = logger;
     }
 
@@ -32,9 +34,13 @@ public class EcbSyncJob : IJob
         {
             var summary = await _ecbRatesService.SyncLatestRatesAsync(cancellationToken);
 
+            // Refreshed on every run, not only when rates changed, so the cache recovers on its own after a Redis
+            // restart, eviction or outage within one job interval
+            var cacheRefreshed = await _currencyRatesProvider.RefreshCacheAsync(cancellationToken);
+
             _logger.LogInformation(
-                "ECB exchange rate sync completed. Fetched: {Fetched}, Inserted: {Inserted}, Updated: {Updated}.",
-                summary.Fetched, summary.Inserted, summary.Updated);
+                "ECB exchange rate sync completed. Fetched: {Fetched}, Inserted: {Inserted}, Updated: {Updated}, Cache refreshed: {CacheRefreshed}.",
+                summary.Fetched, summary.Inserted, summary.Updated, cacheRefreshed);
         }
         catch (Exception ex)
         {

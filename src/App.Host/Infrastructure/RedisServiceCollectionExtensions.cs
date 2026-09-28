@@ -1,5 +1,3 @@
-using System;
-
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -15,12 +13,7 @@ public static class RedisServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddRedis(this IServiceCollection services, IConfiguration configuration)
     {
-        var connectionString = configuration.GetConnectionString("Redis");
-
-        if (string.IsNullOrEmpty(connectionString))
-        {
-            throw new InvalidOperationException("Redis connection string 'Redis' is missing from configuration.");
-        }
+        var connectionString = configuration.GetRequiredConnectionString("Redis");
 
         services.AddSingleton<IConnectionMultiplexer>(_ =>
         {

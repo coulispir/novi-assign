@@ -14,6 +14,11 @@ public interface ICurrencyValueRepository
     /// </summary>
     Task<List<CurrencyValue>> GetByRateDatesAsync(IReadOnlyCollection<DateTime> rateDates, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Loads the most recent rate recorded for each currency, keyed case-insensitively by currency code.
+    /// </summary>
+    Task<IReadOnlyDictionary<string, decimal>> GetLatestRatesAsync(CancellationToken cancellationToken = default);
+
     void AddRange(IEnumerable<CurrencyValue> currencyValues);
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);

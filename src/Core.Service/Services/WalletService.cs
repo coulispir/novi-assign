@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -10,6 +9,7 @@ using System.Threading.Tasks;
 using Core.Service.Data;
 using Core.Service.Entities;
 using Core.Service.Exceptions;
+using Core.Service.Interfaces;
 using Core.Service.Repositories;
 using Core.Service.Strategies;
 
@@ -22,12 +22,14 @@ public class WalletService : IWalletService
     private readonly IWalletRepository _walletRepository;
     private readonly SystemDbContext _dbContext;
     private readonly IBalanceStrategyFactory _strategyFactory;
+    private readonly ICurrencyRatesProvider _currencyRatesProvider;
 
-    public WalletService(IWalletRepository walletRepository, SystemDbContext dbContext, IBalanceStrategyFactory strategyFactory)
+    public WalletService(IWalletRepository walletRepository, SystemDbContext dbContext, IBalanceStrategyFactory strategyFactory, ICurrencyRatesProvider currencyRatesProvider)
     {
         _walletRepository = walletRepository;
         _dbContext = dbContext;
         _strategyFactory = strategyFactory;
+        _currencyRatesProvider = currencyRatesProvider;
     }
 
     public async ValueTask<AccountWallet> CreateAsync(string currency, decimal initialBalance, CancellationToken cancellationToken)
@@ -112,18 +114,22 @@ public class WalletService : IWalletService
 
         string upperTarget = targetCurrency.ToUpperInvariant();
 
-        var rates = await _dbContext.CurrencyValues
-            .Where(r => r.CurrencyCode == wallet.Currency || r.CurrencyCode == upperTarget)
-            .OrderByDescending(r => r.RateDate)
-            .ToListAsync(cancellationToken);
+        var rates = await _currencyRatesProvider.GetLatestRatesAsync(cancellationToken);
 
-        var walletCurrencyRate = wallet.Currency == "EUR" ? 1.0m : rates.FirstOrDefault(r => r.CurrencyCode == wallet.Currency)?.Rate;
-        var targetCurrencyRate = upperTarget == "EUR" ? 1.0m : rates.FirstOrDefault(r => r.CurrencyCode == upperTarget)?.Rate;
+        var walletCurrencyRate = GetEuroRate(rates, wallet.Currency);
+        var targetCurrencyRate = GetEuroRate(rates, upperTarget);
 
         if (walletCurrencyRate is null || targetCurrencyRate is null || walletCurrencyRate == 0)
             throw new InvalidOperationException($"Exchange metrics unavailable for converting {wallet.Currency} to {upperTarget}.");
 
         decimal outputBalance = (wallet.Balance / walletCurrencyRate.Value) * targetCurrencyRate.Value;
         return (wallet, Math.Round(outputBalance, 4), upperTarget);
+    }
+
+    private static decimal? GetEuroRate(IReadOnlyDictionary<string, decimal> rates, string currency)
+    {
+        if (currency == "EUR") return 1.0m;
+
+        return rates.TryGetValue(currency, out var rate) ? rate : null;
     }
 }
