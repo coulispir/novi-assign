@@ -46,16 +46,25 @@ public sealed class WalletHandlerTests
         await AssertServiceNotCalledAsync();
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public async Task HandleAdjustmentAsync_WithoutAnIdempotencyKey_AdjustsWithoutIdempotency(string? idempotencyKey)
+    {
+        await _handler.HandleAdjustmentAsync(new AdjustBalanceCommand(1, 5m, "EUR", BalanceStrategyType.AddFundsStrategy, idempotencyKey), CancellationToken.None);
+
+        await _walletService.Received(1).AdjustBalanceAsync(1, 5m, "EUR", BalanceStrategyType.AddFundsStrategy, null, Arg.Any<CancellationToken>());
+    }
+
     public static TheoryData<string> InvalidIdempotencyKeys => new()
     {
-        string.Empty,
         "   ",
         new string('k', IdempotencyRecord.MaxKeyLength + 1),
     };
 
     [Theory]
     [MemberData(nameof(InvalidIdempotencyKeys))]
-    public async Task HandleAdjustmentAsync_WithMissingOrOversizedIdempotencyKey_ThrowsValidationErrorWithoutCallingTheService(string idempotencyKey)
+    public async Task HandleAdjustmentAsync_WithBlankOrOversizedIdempotencyKey_ThrowsValidationErrorWithoutCallingTheService(string idempotencyKey)
     {
         var handle = () => _handler.HandleAdjustmentAsync(new AdjustBalanceCommand(1, 5m, "EUR", BalanceStrategyType.AddFundsStrategy, idempotencyKey), CancellationToken.None).AsTask();
 

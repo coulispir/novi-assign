@@ -76,7 +76,6 @@ public sealed class WalletLifecycleTests
     {
         { 10m, "EUR", "TransferStrategy", WalletApiClient.NewIdempotencyKey() },   // unknown strategy
         { 0m, "EUR", "AddFundsStrategy", WalletApiClient.NewIdempotencyKey() },    // non-positive amount
-        { 10m, "EUR", "AddFundsStrategy", null },                                  // missing Idempotency-Key
     };
 
     [Theory]
@@ -89,6 +88,33 @@ public sealed class WalletLifecycleTests
 
         await response.ShouldBeErrorAsync(HttpStatusCode.BadRequest, "invalid_request");
         (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(20m);
+    }
+
+    [Fact]
+    public async Task AdjustsWithoutAnIdempotencyKeyExactlyAsTheAssignmentSpecifies()
+    {
+        var wallet = await _api.CreateWalletAsync("EUR", 20m);
+
+        // POST /api/wallets/{walletId}/adjustbalance?amount={amount}&currency={currency}&strategy={strategy}, no header
+        using var response = await _api.AdjustAsync(wallet.Id, 5m, "EUR", "AddFundsStrategy", idempotencyKey: null);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        response.Headers.Contains("Idempotent-Replayed").Should().BeFalse();
+        (await response.Content.ReadFromJsonAsync<WalletDto>()).Should().Be(new WalletDto(wallet.Id, "EUR", 25m));
+    }
+
+    [Fact]
+    public async Task AppliesEachIdenticalRequestWithoutAKey()
+    {
+        // Without a key there's nothing to recognise a retry by, so each request is a new adjustment
+        var wallet = await _api.CreateWalletAsync("EUR", 20m);
+
+        using var first = await _api.AdjustAsync(wallet.Id, 5m, "EUR", "AddFundsStrategy", idempotencyKey: null);
+        using var second = await _api.AdjustAsync(wallet.Id, 5m, "EUR", "AddFundsStrategy", idempotencyKey: null);
+
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        second.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(30m);
     }
 
     [Fact]

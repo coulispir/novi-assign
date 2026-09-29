@@ -61,7 +61,7 @@ public class WalletController : ControllerBase
 
     // 🛠️ 3. ADJUST WALLET BALANCE ENDPOINT
     // POST /api/wallets/{walletId}/adjustbalance?amount=50&currency=EUR&strategy=SubtractFundsStrategy (a BalanceStrategyType name)
-    // Header: Idempotency-Key: <client-generated unique value, e.g. a UUID>
+    // Optional header: Idempotency-Key: <client-generated unique value, e.g. a UUID>. With it, retries replay instead of re-applying.
     [HttpPost("{walletId:long}/adjustbalance")]
     [EnableRateLimiting(RateLimitPolicies.WalletAdjust)]
     [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(WalletResponse))]
@@ -77,7 +77,7 @@ public class WalletController : ControllerBase
         [FromHeader(Name = IdempotencyKeyHeader)] string? idempotencyKey,
         CancellationToken cancellationToken)
     {
-        var command = new AdjustBalanceCommand(walletId, amount, currency, strategy, idempotencyKey ?? string.Empty);
+        var command = new AdjustBalanceCommand(walletId, amount, currency, strategy, idempotencyKey);
         var result = await _handler.HandleAdjustmentAsync(command, cancellationToken);
 
         if (result.IsReplay)

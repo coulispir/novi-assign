@@ -101,8 +101,11 @@ public sealed class OpenApiDocumentTests : IAsyncLifetime
     {
         var adjust = _document.GetProperty("paths").GetProperty("/api/wallets/{walletId}/adjustbalance").GetProperty("post");
 
-        adjust.GetProperty("parameters").EnumerateArray()
-            .Should().Contain(p => p.GetProperty("name").GetString() == "Idempotency-Key" && p.GetProperty("in").GetString() == "header");
+        var idempotencyKey = adjust.GetProperty("parameters").EnumerateArray()
+            .Single(p => p.GetProperty("name").GetString() == "Idempotency-Key");
+        idempotencyKey.GetProperty("in").GetString().Should().Be("header");
+        // Optional: the assignment's URL has no header, so the endpoint must work without it
+        (idempotencyKey.TryGetProperty("required", out var required) && required.GetBoolean()).Should().BeFalse();
 
         adjust.GetProperty("responses").EnumerateObject().Select(r => r.Name)
             .Should().BeEquivalentTo("200", "400", "404", "409", "422", "429", "500");

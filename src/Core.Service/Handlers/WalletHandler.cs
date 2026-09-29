@@ -10,7 +10,7 @@ using Core.Service.Strategies;
 namespace Core.Service.Handlers;
 
 public record CreateWalletCommand(string Currency, decimal InitialBalance);
-public record AdjustBalanceCommand(long WalletId, decimal Amount, string Currency, BalanceStrategyType Strategy, string IdempotencyKey);
+public record AdjustBalanceCommand(long WalletId, decimal Amount, string Currency, BalanceStrategyType Strategy, string? IdempotencyKey);
 public record GetBalanceQuery(long WalletId, string? TargetCurrency);
 public record BalanceDisplayResult(long WalletId, decimal OriginalBalance, string OriginalCurrency, decimal RequestedBalance, string RequestedCurrency);
 
@@ -40,10 +40,14 @@ public class WalletHandler : IWalletHandler
         if (command.Amount <= 0)
             throw new DomainValidationException("The amount parameter must always be a positive number.");
 
-        if (string.IsNullOrWhiteSpace(command.IdempotencyKey) || command.IdempotencyKey.Length > IdempotencyRecord.MaxKeyLength)
-            throw new DomainValidationException($"The Idempotency-Key header is required and must be at most {IdempotencyRecord.MaxKeyLength} characters.");
+        // The key is optional: without one the adjustment simply runs. A key that is sent must be usable, though, so a
+        // blank or oversized one is a client error rather than silently treated as "no key".
+        var idempotencyKey = string.IsNullOrEmpty(command.IdempotencyKey) ? null : command.IdempotencyKey;
 
-        return await _walletService.AdjustBalanceAsync(command.WalletId, command.Amount, command.Currency, command.Strategy, command.IdempotencyKey, cancellationToken);
+        if (idempotencyKey is not null && (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length > IdempotencyRecord.MaxKeyLength))
+            throw new DomainValidationException($"The Idempotency-Key header is optional, but when sent it must be 1-{IdempotencyRecord.MaxKeyLength} characters and not blank.");
+
+        return await _walletService.AdjustBalanceAsync(command.WalletId, command.Amount, command.Currency, command.Strategy, idempotencyKey, cancellationToken);
     }
 
     public async ValueTask<BalanceDisplayResult> HandleQueryAsync(GetBalanceQuery query, CancellationToken cancellationToken)

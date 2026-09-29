@@ -71,10 +71,10 @@ Every error the API returns has the same JSON body:
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `invalid_request` | Invalid input: a missing or unparsable parameter, malformed JSON, an unknown strategy, non-positive amount, missing or too long `Idempotency-Key`, bad currency code, negative initial balance, an amount in another currency that converts to less than 0.0001 of the wallet's currency |
+| 400 | `invalid_request` | Invalid input: a missing or unparsable parameter, malformed JSON, an unknown strategy, non-positive amount, a blank or too long `Idempotency-Key`, bad currency code, negative initial balance, an amount in another currency that converts to less than 0.0001 of the wallet's currency |
 | 400 | `unsupported_currency` | No exchange rate is known for the requested conversion or adjustment currency |
 | 404 | `wallet_not_found` | The wallet doesn't exist |
-| 409 | `concurrency_conflict` | Another request changed the wallet at the same time. Retry with the same `Idempotency-Key` |
+| 409 | `concurrency_conflict` | Another request changed the wallet at the same time. Nothing was applied: retry the request (with the same `Idempotency-Key`, if you sent one) |
 | 422 | `insufficient_funds` | `SubtractFundsStrategy` would take the balance below zero |
 | 422 | `idempotency_key_reused` | The `Idempotency-Key` was already used for a different request |
 | 429 | `rate_limited` | Rate limit exceeded; see [Rate limiting](#rate-limiting) |
@@ -200,12 +200,29 @@ The feed URL, the HTTP timeout and the job interval come from `appsettings.json`
 - Like every setting, each can be overridden per environment, e.g. `EcbSync__Interval=00:05:00`.
 - The app refuses to start if the URL isn't an absolute http(s) URL, or the timeout or the interval is missing or not positive.
 
+## Idempotent adjustments (optional)
+
+`POST /api/wallets/{walletId}/adjustbalance?amount=&currency=&strategy=` works exactly as the assignment specifies, with no extra header. Each request applies its adjustment, so two identical requests apply twice, as with any plain `POST`.
+
+To make retries safe (e.g. after a timeout, when the client can't tell whether the first attempt went through), send an optional `Idempotency-Key` header with a unique value such as a UUID:
+
+```bash
+curl -sS -i -X POST 'http://localhost:5000/api/wallets/1/adjustbalance?amount=5&currency=EUR&strategy=AddFundsStrategy' -H "Idempotency-Key: $(uuidgen)"
+```
+
+- **The first request with a key applies the adjustment and stores its result**, in the same transaction as the balance change.
+- **A retry with the same key and the same parameters** isn't applied again. It returns the stored result with an `Idempotent-Replayed: true` header, even when the retries arrive in parallel.
+- **The same key with different parameters** is rejected with `422 idempotency_key_reused`.
+- **A key that is sent must be usable:** 1-100 characters and not blank, otherwise `400 invalid_request`. An empty header counts as no key.
+
+Without a key, concurrent adjustments are still safe: the wallet's row version makes a conflicting update fail with `409 concurrency_conflict` instead of losing an update.
+
 ## Adjustments in another currency
 
 A balance adjustment can be made in any currency with a known exchange rate, not only the wallet's own. For example, `amount=50&currency=USD` on a EUR wallet converts the 50 USD to EUR and then applies the strategy:
 
 ```bash
-curl -sS -X POST 'http://localhost:5000/api/wallets/1/adjustbalance?amount=50&currency=USD&strategy=AddFundsStrategy' -H "Idempotency-Key: $(uuidgen)"
+curl -sS -X POST 'http://localhost:5000/api/wallets/1/adjustbalance?amount=50&currency=USD&strategy=AddFundsStrategy'
 ```
 
 - **Converted with the latest ECB rates**, through EUR (`amount / rate(from) * rate(to)`) and rounded to 4 decimal places, the precision balances are stored with. Balance conversion on `GET` uses the same [CurrencyConverter](src/Core.Service/Services/CurrencyConverter.cs), so the two never disagree. The rates come from the [currency rates cache](#currency-rates-cache).

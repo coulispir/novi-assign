@@ -119,6 +119,29 @@ public sealed class IdempotencyAndConcurrencyTests
         (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(100m + (10m * applied));
     }
 
+    [Fact]
+    public async Task ConcurrentAdjustmentsWithoutKeysNeverLoseAnUpdate()
+    {
+        var wallet = await _api.CreateWalletAsync("EUR", 100m);
+
+        // No idempotency record is written, so only the wallet's row version protects the balance
+        var responses = await SendInParallelAsync(() => _api.AdjustAsync(wallet.Id, 10m, "EUR", "AddFundsStrategy", idempotencyKey: null));
+
+        int applied;
+        try
+        {
+            responses.Should().OnlyContain(r => r.StatusCode == HttpStatusCode.OK || r.StatusCode == HttpStatusCode.Conflict);
+            applied = responses.Count(r => r.StatusCode == HttpStatusCode.OK);
+        }
+        finally
+        {
+            DisposeAll(responses);
+        }
+
+        applied.Should().BePositive();
+        (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(100m + (10m * applied));
+    }
+
     private static Task<HttpResponseMessage[]> SendInParallelAsync(System.Func<Task<HttpResponseMessage>> send) =>
         Task.WhenAll(Enumerable.Range(0, ParallelRequests).Select(_ => Task.Run(send)));
 
