@@ -1,3 +1,7 @@
+# Health: /health checks SQL Server and Redis (503 if SQL Server is down, Degraded if only Redis is); /health/live checks nothing
+curl -sS http://localhost:5000/health
+curl -sS http://localhost:5000/health/live
+
 curl -sS -X POST http://localhost:5000/api/wallets -H 'Content-Type: application/json' -d '{"currency":"EUR","initialBalance":100}'
 
 curl -sS http://localhost:5000/api/wallets/1
