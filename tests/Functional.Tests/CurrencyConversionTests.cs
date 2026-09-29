@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.Net.Http.Json;
 using System.Threading.Tasks;
 
 using App.Host.Infrastructure.Caching;
@@ -130,6 +131,68 @@ public sealed class CurrencyConversionTests
     {
         await using var scope = _factory.Services.CreateAsyncScope();
         await scope.ServiceProvider.GetRequiredService<ICurrencyRatesProvider>().RefreshCacheAsync();
+    }
+
+    [Theory]
+    [InlineData("AddFundsStrategy", 1)]
+    [InlineData("SubtractFundsStrategy", -1)]
+    public async Task AdjustsInAnotherCurrencyAtTheSyncedRate(string strategy, int sign)
+    {
+        var wallet = await _api.CreateWalletAsync("EUR", 100m);
+
+        using var response = await _api.AdjustAsync(wallet.Id, 50m, FakeEcbFeed.StableCurrencyA, strategy);
+
+        var expectedBalance = 100m + (sign * ExpectedConversion(50m, FakeEcbFeed.StableCurrencyA, "EUR"));
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await response.Content.ReadFromJsonAsync<WalletDto>()).Should().Be(new WalletDto(wallet.Id, "EUR", expectedBalance));
+        (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(expectedBalance);
+    }
+
+    [Fact]
+    public async Task ConvertsBetweenTwoNonEuroCurrencies()
+    {
+        var wallet = await _api.CreateWalletAsync(FakeEcbFeed.StableCurrencyB, 10m);
+
+        using var response = await _api.AdjustAsync(wallet.Id, 20m, FakeEcbFeed.StableCurrencyA, "AddFundsStrategy");
+
+        (await response.Content.ReadFromJsonAsync<WalletDto>())!.Balance
+            .Should().Be(10m + ExpectedConversion(20m, FakeEcbFeed.StableCurrencyA, FakeEcbFeed.StableCurrencyB));
+    }
+
+    [Fact]
+    public async Task ChecksTheOverdraftRuleOnTheConvertedAmount()
+    {
+        // 100 USD is about 87.70 EUR: within a 90 EUR balance, while 110 USD (about 96.47 EUR) is not
+        var wallet = await _api.CreateWalletAsync("EUR", 90m);
+
+        using var rejected = await _api.AdjustAsync(wallet.Id, 110m, FakeEcbFeed.StableCurrencyA, "SubtractFundsStrategy");
+        await rejected.ShouldBeErrorAsync(HttpStatusCode.UnprocessableEntity, "insufficient_funds");
+
+        using var allowed = await _api.AdjustAsync(wallet.Id, 100m, FakeEcbFeed.StableCurrencyA, "SubtractFundsStrategy");
+        allowed.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(90m - ExpectedConversion(100m, FakeEcbFeed.StableCurrencyA, "EUR"));
+    }
+
+    [Fact]
+    public async Task RejectsAnAdjustmentInAnUnknownCurrencyWithoutChangingTheBalance()
+    {
+        var wallet = await _api.CreateWalletAsync("EUR", 100m);
+
+        using var response = await _api.AdjustAsync(wallet.Id, 10m, "XYZ", "AddFundsStrategy");
+
+        await response.ShouldBeErrorAsync(HttpStatusCode.BadRequest, "unsupported_currency");
+        (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(100m);
+    }
+
+    [Fact]
+    public async Task RejectsAnAmountThatConvertsToLessThanTheSmallestUnit()
+    {
+        var wallet = await _api.CreateWalletAsync("EUR", 100m);
+
+        using var response = await _api.AdjustAsync(wallet.Id, 0.00001m, FakeEcbFeed.StableCurrencyA, "AddFundsStrategy");
+
+        await response.ShouldBeErrorAsync(HttpStatusCode.BadRequest, "invalid_request");
+        (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(100m);
     }
 
     private static decimal ExpectedConversion(decimal amount, string from, string to)

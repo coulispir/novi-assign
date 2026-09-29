@@ -63,7 +63,14 @@ Middleware order in `Program.cs` matters: `UseForwardedHeaders` (first, so the r
 |---|---|---|
 | `POST /api/wallets` body `{ "currency": "EUR", "initialBalance": 100 }` | `wallet-create` | 201 |
 | `GET /api/wallets/{walletId}?currency=USD` | `wallet-read` | `currency` optional; converts via EUR |
-| `POST /api/wallets/{walletId}/adjustbalance?amount=&currency=&strategy=` + `Idempotency-Key` header | `wallet-adjust` | `Idempotent-Replayed: true` on replay |
+| `POST /api/wallets/{walletId}/adjustbalance?amount=&currency=&strategy=` + `Idempotency-Key` header | `wallet-adjust` | `currency` may differ from the wallet's: converted first. `Idempotent-Replayed: true` on replay |
+
+**The OpenAPI contract** is generated from the controllers by the built-in `Microsoft.AspNetCore.OpenApi` and browsable with Swagger UI, **in Development only**: `/swagger` and `/openapi/v1.json` (set up in [ApiDocumentationExtensions.cs](src/App.Host/Infrastructure/ApiDocumentationExtensions.cs)). Nothing is hand-written, so keep the controllers descriptive:
+- Declare **every** status an action can return with `[ProducesResponseType]`, errors with `Type = typeof(ErrorResponse)`. An undeclared status is missing from the contract clients generate code from.
+- Bind inputs with explicit `[FromRoute]` / `[FromQuery]` / `[FromHeader(Name = ...)]` / `[FromBody]` and return typed models, so parameters and schemas appear in the document.
+- A new endpoint or status code gets a check in [OpenApiDocumentTests](tests/Integration.Tests/OpenApi/OpenApiDocumentTests.cs).
+- Don't add Swashbuckle's generator (`AddSwaggerGen`) alongside it: only its UI package is used.
+- The spec is **OpenAPI 3.0** with numbers documented as plain `number`/`integer` (a schema transformer removes the "or string" .NET adds). Keep both: "number or string" schemas break Swagger UI's form and make generated clients use strings for amounts. `OpenApiDocumentTests` fails if one comes back.
 
 ## Errors
 
@@ -92,7 +99,9 @@ Rules:
 **Money and currencies**
 - Always `decimal`, never `double`. Balances are `decimal(18,4)`, rates `decimal(18,6)`. Converted balances are rounded to 4 places.
 - Currency codes are 3-letter ISO, stored upper-case as `char(3)` (non-Unicode). Compare case-insensitively.
-- All rates are **relative to EUR**. EUR is always 1 (the gateway injects it, and `WalletService.GetEuroRate` short-circuits it). Conversion is `balance / rate(from) * rate(to)`.
+- All rates are **relative to EUR**. EUR is always 1 (the gateway injects it, and `CurrencyConverter` short-circuits it). Conversion is `amount / rate(from) * rate(to)`, rounded to 4 decimals.
+- **All conversion goes through [CurrencyConverter](src/Core.Service/Services/CurrencyConverter.cs)**: balance display on `GET` and adjustments in another currency. Don't duplicate the maths.
+- **Adjustments may be in any currency with a rate.** `WalletService` converts the amount to the wallet's currency *before* the strategy runs, so balance rules (no overdraft) apply in the wallet's currency. An amount that rounds to 0 after conversion is a `DomainValidationException`; a currency without a rate is an `UnsupportedCurrencyException`.
 
 **Entities** ([Core.Service/Entities](src/Core.Service/Entities))
 - Private setters, a private parameterless constructor for EF, a static `Create(...)` factory that validates, and behaviour methods (`Credit`, `Debit`, `ForceDebit`, `UpdateRate`) that set `UpdatedAt`. Don't add public setters; add a method.

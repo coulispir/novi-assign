@@ -59,7 +59,7 @@ public sealed class ErrorResponseTests : IAsyncLifetime
 
     public static TheoryData<Exception, HttpStatusCode, string> DomainFailures => new()
     {
-        { new DomainValidationException("Currency mismatch."), HttpStatusCode.BadRequest, ErrorCodes.InvalidRequest },
+        { new DomainValidationException("Unknown strategy."), HttpStatusCode.BadRequest, ErrorCodes.InvalidRequest },
         { new UnsupportedCurrencyException("No exchange rate."), HttpStatusCode.BadRequest, ErrorCodes.UnsupportedCurrency },
         { new WalletNotFoundException(42), HttpStatusCode.NotFound, ErrorCodes.WalletNotFound },
         { new ConcurrencyConflictException("Modified by another request."), HttpStatusCode.Conflict, ErrorCodes.ConcurrencyConflict },

@@ -108,6 +108,9 @@ builder.Services.AddClientIpRateLimiting(builder.Configuration, Wallet.Api.RateL
 builder.Services.AddControllers()
     .AddApplicationPart(typeof(Wallet.Api.AssemblyReference).Assembly);
 
+// OpenAPI document generated from the controllers, browsable through Swagger UI in Development
+builder.Services.AddApiDocumentation();
+
 var app = builder.Build();
 
 // Configure HTTP Request Pipeline
@@ -124,6 +127,11 @@ app.UseRouting();
 // After routing, so endpoint-specific policies ([EnableRateLimiting]) are resolved
 app.UseRateLimiter();
 app.MapControllers();
+
+if (app.Environment.IsDevelopment())
+{
+    app.MapApiDocumentation();
+}
 
 // AUTOMATED DB INITIALIZATION AUTOMATION
 // Creates database and applies migrations on startup if they don't exist yet
