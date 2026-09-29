@@ -175,3 +175,4 @@ The README is the design record and is kept up to date with every feature: how i
 - Branch from `master` as `feature/<name>` or `chore/<name>`; PRs go to `master`.
 - Commit messages: `feature: <Sentence.>` or `chore: <Sentence.>` (e.g. `feature: Add rate limit mechanism with Redis.`).
 - Before opening a PR, run `dotnet build` (0 warnings) and `dotnet test`.
+- CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs exactly that on `ubuntu-latest` (Release configuration), plus a build of the production Docker image. It is the source of truth for what a PR must pass, so keep it green. A new test project is picked up automatically once it's in `WalletSystem.slnx`. Container images used by tests must run on linux/amd64 runners.
