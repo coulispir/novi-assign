@@ -6,6 +6,9 @@ using System.Threading.Tasks;
 using App.Host.Infrastructure.Ecb;
 using App.Host.Infrastructure.Jobs;
 
+using Core.Service.Decorators;
+using Core.Service.Interfaces;
+
 using Ecb.Gateway;
 
 using FluentAssertions;
@@ -39,6 +42,15 @@ public sealed class EcbConfigurationTests
         services.GetRequiredService<IOptions<EcbClientOptions>>().Value.DailyRatesUrl.Should().Be(new Uri("https://ecb.example/eurofxref-daily.xml"));
         // A typed client's HttpClient is registered under the service type's name
         services.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(IEcbClient)).Timeout.Should().Be(TimeSpan.FromSeconds(7));
+    }
+
+    [Fact]
+    public void ResolvesTheGatewayPortToTheLoggingDecoratorAroundTheAdapter()
+    {
+        using var services = new ServiceCollection().AddLogging().AddEcbGateway(Configuration()).BuildServiceProvider();
+        using var scope = services.CreateScope();
+
+        scope.ServiceProvider.GetRequiredService<IEcbGateway>().Should().BeOfType<LoggingEcbGatewayDecorator>();
     }
 
     public static TheoryData<string, string?, string> InvalidEcbSettings => new()

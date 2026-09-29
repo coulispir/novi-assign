@@ -159,7 +159,7 @@ The Redis connection string is `ConnectionStrings:Redis`, set to `redis:6379` in
 [EcbSyncJob](src/Core.Service/Jobs/EcbSyncJob.cs) runs on startup and then every minute by default (Quartz, on one node per trigger). It fetches the daily ECB feed through the [Ecb.Gateway](src/Ecb.Gateway/EcbClient.cs) library, saves the rates to SQL Server, then refreshes the [currency rates cache](#currency-rates-cache).
 
 ```
-ECB feed ──► EcbClient (Ecb.Gateway: EcbDailyRates) ──► EcbGatewayAdapter (+ EUR, EcbRateResult) ──► EcbRatesService (validate, de-duplicate) ──► one MERGE ──► CurrencyValues
+ECB feed ──► EcbClient (Ecb.Gateway: EcbDailyRates) ──► EcbGatewayAdapter (+ EUR, EcbRateResult) ──► LoggingEcbGatewayDecorator ──► EcbRatesService (validate, de-duplicate) ──► one MERGE ──► CurrencyValues
 ```
 
 **The gateway is a standalone library.** `Ecb.Gateway` references no other project. It exposes `IEcbClient`, which returns the feed as typed objects (`EcbDailyRates`: the publication date and each `EcbRate`), so any application could use it. The core doesn't depend on it either: `Core.Service` defines the `IEcbGateway` port it needs, and [EcbGatewayAdapter](src/App.Host/Infrastructure/Ecb/EcbGatewayAdapter.cs) in the host connects the two. The adapter also adds EUR at 1, because every ECB rate is quoted against the euro and the feed doesn't list EUR itself.
@@ -179,6 +179,7 @@ ECB feed ──► EcbClient (Ecb.Gateway: EcbDailyRates) ──► EcbGatewayAd
 - **The feed is cleaned first.** `EcbRatesService` validates every rate through `CurrencyValue.Create` (a 3-letter code, a positive rate, the date only) and keeps one entry per currency and date. A `MERGE` fails if its source matches the same row twice. An invalid rate fails the whole sync before anything is written, and the job retries on its next run.
 - **Limit:** SQL Server allows 2100 parameters per statement and each rate uses 4, so one merge takes at most 500 rates (`MaxRatesPerMerge`). The daily feed has about 30.
 - **Safe to retry.** Running the same merge again changes nothing, so EF's retry on transient SQL errors can safely repeat it.
+- **Every feed call is timed and logged by a decorator.** [LoggingEcbGatewayDecorator](src/Core.Service/Decorators/LoggingEcbGatewayDecorator.cs) wraps the `IEcbGateway` port and logs `Fetched 30 rates from the ECB feed for 2026-09-29 in 231 ms`, or a warning with the elapsed time and the exception when the feed fails. It passes results and exceptions through unchanged, so neither the adapter nor the job knows it's there. It's added with the built-in container: `AddEcbGateway` registers the adapter as itself, and `IEcbGateway` resolves to the decorator wrapping it. `FailOpenRateLimiter` uses the same pattern around the Redis rate limiter.
 
 ### Configuration
 
