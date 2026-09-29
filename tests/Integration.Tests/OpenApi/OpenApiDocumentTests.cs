@@ -40,7 +40,7 @@ public sealed class OpenApiDocumentTests : IAsyncLifetime
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
         builder.Services.AddSingleton(Substitute.For<IWalletHandler>());
-        builder.Services.AddControllers().AddApplicationPart(typeof(AssemblyReference).Assembly);
+        builder.Services.AddWalletApi();
         builder.Services.AddApiDocumentation();
 
         _app = builder.Build();
@@ -106,6 +106,28 @@ public sealed class OpenApiDocumentTests : IAsyncLifetime
 
         adjust.GetProperty("responses").EnumerateObject().Select(r => r.Name)
             .Should().BeEquivalentTo("200", "400", "404", "409", "422", "429", "500");
+    }
+
+    [Fact]
+    public void ListsTheStrategiesAsARequiredStringEnum()
+    {
+        var strategy = _document.GetProperty("paths").GetProperty("/api/wallets/{walletId}/adjustbalance").GetProperty("post")
+            .GetProperty("parameters").EnumerateArray().Single(p => p.GetProperty("name").GetString() == "strategy");
+
+        strategy.GetProperty("required").GetBoolean().Should().BeTrue();
+        var schema = Resolve(strategy.GetProperty("schema"));
+        schema.GetProperty("type").GetString().Should().Be("string");
+        schema.GetProperty("enum").EnumerateArray().Select(value => value.GetString())
+            .Should().Equal("AddFundsStrategy", "SubtractFundsStrategy", "ForceSubtractFundsStrategy");
+    }
+
+    // Enum schemas may be inlined or referenced from components
+    private JsonElement Resolve(JsonElement schema)
+    {
+        if (!schema.TryGetProperty("$ref", out var reference)) return schema;
+
+        var name = reference.GetString()!.Split('/')[^1];
+        return _document.GetProperty("components").GetProperty("schemas").GetProperty(name);
     }
 
     [Fact]

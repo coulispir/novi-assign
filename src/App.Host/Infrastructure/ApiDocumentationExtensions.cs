@@ -1,3 +1,5 @@
+using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 
 using Microsoft.AspNetCore.Builder;
@@ -32,6 +34,15 @@ public static class ApiDocumentationExtensions
                 {
                     schema.Type = type & ~JsonSchemaType.String;
                     schema.Pattern = null; // Only there to constrain the string form
+                }
+
+                // Enums serialised as names (e.g. BalanceStrategyType) are generated as a bare value list without a type.
+                // Declare it, so generators produce a string enum rather than an untyped value.
+                if (schema.Type is null
+                    && schema.Enum is { Count: > 0 } values
+                    && values.All(value => value?.GetValueKind() == JsonValueKind.String))
+                {
+                    schema.Type = JsonSchemaType.String;
                 }
 
                 return Task.CompletedTask;

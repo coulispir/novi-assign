@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Core.Service.Exceptions;
 using Core.Service.Handlers;
 using Core.Service.Services;
+using Core.Service.Strategies;
 
 using FluentAssertions;
 
@@ -41,7 +42,7 @@ public sealed class ErrorResponseTests : IAsyncLifetime
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
         builder.Services.AddSingleton(_handler);
-        builder.Services.AddControllers().AddApplicationPart(typeof(AssemblyReference).Assembly);
+        builder.Services.AddWalletApi();
 
         _app = builder.Build();
         _app.UseRouting();
@@ -113,6 +114,80 @@ public sealed class ErrorResponseTests : IAsyncLifetime
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         response.Headers.GetValues("Idempotent-Replayed").Should().Equal("true");
         (await response.Content.ReadFromJsonAsync<WalletResponse>()).Should().Be(new WalletResponse(1, "EUR", 20m));
+    }
+
+    public static TheoryData<string> InvalidStrategies => new()
+    {
+        "strategy=TransferStrategy",  // unknown name
+        "strategy=0",                 // a number, even one that matches a member
+        "strategy=42",                // a number no member has
+        "strategy=",                  // empty
+        "",                           // missing
+    };
+
+    [Theory]
+    [MemberData(nameof(InvalidStrategies))]
+    public async Task RejectsAnInvalidStrategyWithTheErrorResponseBodyBeforeReachingTheHandler(string strategyQuery)
+    {
+        using var response = await _client.SendAsync(AdjustBalance($"amount=10&currency=EUR&{strategyQuery}"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var error = await response.Content.ReadFromJsonAsync<ErrorResponse>();
+        error!.Code.Should().Be(ErrorCodes.InvalidRequest);
+        error.Error.Should().Contain("strategy");
+        await _handler.DidNotReceiveWithAnyArgs().HandleAdjustmentAsync(default!, default);
+    }
+
+    [Fact]
+    public async Task NamesTheParameterAndReportsEachProblemOnce()
+    {
+        using var response = await _client.SendAsync(AdjustBalance("amount=10&currency=EUR&strategy=TransferStrategy"));
+
+        (await response.Content.ReadFromJsonAsync<ErrorResponse>())!.Error
+            .Should().Be("strategy: The value 'TransferStrategy' is not valid.");
+    }
+
+    [Theory]
+    [InlineData("currency=EUR&strategy=AddFundsStrategy")]              // missing amount
+    [InlineData("amount=ten&currency=EUR&strategy=AddFundsStrategy")]   // unparsable amount
+    [InlineData("amount=10&strategy=AddFundsStrategy")]                 // missing currency
+    public async Task RejectsMissingOrMalformedParametersWithTheErrorResponseBody(string query)
+    {
+        using var response = await _client.SendAsync(AdjustBalance(query));
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await response.Content.ReadFromJsonAsync<ErrorResponse>())!.Code.Should().Be(ErrorCodes.InvalidRequest);
+    }
+
+    [Fact]
+    public async Task RejectsAMalformedJsonBodyWithTheErrorResponseBody()
+    {
+        using var content = new StringContent("{ \"currency\": ", System.Text.Encoding.UTF8, "application/json");
+
+        using var response = await _client.PostAsync(new Uri("/api/wallets", UriKind.Relative), content);
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await response.Content.ReadFromJsonAsync<ErrorResponse>())!.Code.Should().Be(ErrorCodes.InvalidRequest);
+    }
+
+    [Fact]
+    public async Task BindsTheStrategyNameIgnoringCase()
+    {
+        _handler.HandleAdjustmentAsync(default!, default).ReturnsForAnyArgs(new WalletAdjustmentResult(1, "EUR", 20m, IsReplay: false));
+
+        using var response = await _client.SendAsync(AdjustBalance("amount=10&currency=EUR&strategy=forcesubtractfundsstrategy"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        await _handler.Received(1).HandleAdjustmentAsync(
+            Arg.Is<AdjustBalanceCommand>(command => command.Strategy == BalanceStrategyType.ForceSubtractFundsStrategy),
+            Arg.Any<System.Threading.CancellationToken>());
+    }
+
+    private static HttpRequestMessage AdjustBalance(string query)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, new Uri($"/api/wallets/1/adjustbalance?{query}", UriKind.Relative));
+        request.Headers.Add("Idempotency-Key", Guid.NewGuid().ToString());
+        return request;
     }
 
     private static HttpRequestMessage AdjustBalance()

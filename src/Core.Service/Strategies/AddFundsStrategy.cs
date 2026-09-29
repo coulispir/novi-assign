@@ -4,7 +4,7 @@ namespace Core.Service.Strategies;
 
 public class AddFundsStrategy : IBalanceStrategy
 {
-    public string Name => "AddFundsStrategy";
+    public BalanceStrategyType Type => BalanceStrategyType.AddFundsStrategy;
 
     public void Apply(AccountWallet wallet, decimal amount)
     {

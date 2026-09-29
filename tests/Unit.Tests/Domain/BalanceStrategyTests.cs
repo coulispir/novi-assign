@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 
 using Core.Service.Entities;
 using Core.Service.Exceptions;
@@ -18,14 +19,14 @@ public sealed class BalanceStrategyTests
     ]);
 
     [Theory]
-    [InlineData("AddFundsStrategy", 15)]
-    [InlineData("SubtractFundsStrategy", 5)]
-    [InlineData("ForceSubtractFundsStrategy", 5)]
-    public void EachStrategy_AppliesItsBalanceRule(string strategyName, decimal expectedBalance)
+    [InlineData(BalanceStrategyType.AddFundsStrategy, 15)]
+    [InlineData(BalanceStrategyType.SubtractFundsStrategy, 5)]
+    [InlineData(BalanceStrategyType.ForceSubtractFundsStrategy, 5)]
+    public void EachStrategy_AppliesItsBalanceRule(BalanceStrategyType type, decimal expectedBalance)
     {
         var wallet = AccountWallet.Create("EUR", 10m);
 
-        _factory.GetStrategy(strategyName).Apply(wallet, 5m);
+        _factory.GetStrategy(type).Apply(wallet, 5m);
 
         wallet.Balance.Should().Be(expectedBalance);
     }
@@ -35,7 +36,7 @@ public sealed class BalanceStrategyTests
     {
         var wallet = AccountWallet.Create("EUR", 10m);
 
-        var subtract = () => _factory.GetStrategy("SubtractFundsStrategy").Apply(wallet, 10.01m);
+        var subtract = () => _factory.GetStrategy(BalanceStrategyType.SubtractFundsStrategy).Apply(wallet, 10.01m);
 
         subtract.Should().Throw<InsufficientFundsException>();
         wallet.Balance.Should().Be(10m);
@@ -46,27 +47,53 @@ public sealed class BalanceStrategyTests
     {
         var wallet = AccountWallet.Create("EUR", 10m);
 
-        _factory.GetStrategy("ForceSubtractFundsStrategy").Apply(wallet, 25m);
+        _factory.GetStrategy(BalanceStrategyType.ForceSubtractFundsStrategy).Apply(wallet, 25m);
 
         wallet.Balance.Should().Be(-15m);
     }
 
-    [Theory]
-    [InlineData("addfundsstrategy")]
-    [InlineData("ADDFUNDSSTRATEGY")]
-    public void Factory_ResolvesStrategiesCaseInsensitively(string strategyName)
+    [Fact]
+    public void Factory_ResolvesEachTypeToTheStrategyOfThatType()
     {
-        _factory.GetStrategy(strategyName).Should().BeOfType<AddFundsStrategy>();
+        foreach (var type in Enum.GetValues<BalanceStrategyType>())
+        {
+            _factory.GetStrategy(type).Type.Should().Be(type);
+        }
     }
 
-    [Theory]
-    [InlineData("")]
-    [InlineData(" ")]
-    [InlineData("TransferFundsStrategy")]
-    public void Factory_WithUnknownStrategy_ThrowsValidationErrorListingTheSupportedOnes(string strategyName)
+    [Fact]
+    public void Factory_WithAnUndefinedType_ThrowsValidationErrorListingTheSupportedOnes()
     {
-        var resolve = () => _factory.GetStrategy(strategyName);
+        var resolve = () => _factory.GetStrategy((BalanceStrategyType)42);
 
         resolve.Should().Throw<DomainValidationException>().WithMessage("*AddFundsStrategy*SubtractFundsStrategy*ForceSubtractFundsStrategy*");
+    }
+
+    [Fact]
+    public void Factory_WithAStrategyMissing_FailsOnConstruction()
+    {
+        var create = () => new BalanceStrategyFactory([new AddFundsStrategy(), new SubtractFundsStrategy()]);
+
+        create.Should().Throw<InvalidOperationException>().WithMessage("*ForceSubtractFundsStrategy*");
+    }
+
+    [Fact]
+    public void Factory_WithTwoStrategiesOfTheSameType_FailsOnConstruction()
+    {
+        var create = () => new BalanceStrategyFactory(
+            [new AddFundsStrategy(), new AddFundsStrategy(), new SubtractFundsStrategy(), new ForceSubtractFundsStrategy()]);
+
+        create.Should().Throw<InvalidOperationException>().WithMessage("*AddFundsStrategy*");
+    }
+
+    [Fact]
+    public void EveryTypeHasExactlyOneStrategyClass()
+    {
+        // Guards the host's registrations: adding an enum member without a strategy class fails here first
+        var strategyTypes = typeof(IBalanceStrategy).Assembly.GetTypes()
+            .Where(t => typeof(IBalanceStrategy).IsAssignableFrom(t) && t is { IsInterface: false, IsAbstract: false })
+            .Select(t => ((IBalanceStrategy)Activator.CreateInstance(t)!).Type);
+
+        strategyTypes.Should().BeEquivalentTo(Enum.GetValues<BalanceStrategyType>());
     }
 }

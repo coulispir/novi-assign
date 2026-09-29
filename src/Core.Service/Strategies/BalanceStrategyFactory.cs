@@ -8,27 +8,35 @@ namespace Core.Service.Strategies;
 
 public interface IBalanceStrategyFactory
 {
-    IBalanceStrategy GetStrategy(string strategyName);
+    IBalanceStrategy GetStrategy(BalanceStrategyType type);
 }
 
 public class BalanceStrategyFactory : IBalanceStrategyFactory
 {
-    private readonly Dictionary<string, IBalanceStrategy> _strategies;
+    private readonly Dictionary<BalanceStrategyType, IBalanceStrategy> _strategies = new();
 
     public BalanceStrategyFactory(IEnumerable<IBalanceStrategy> strategies)
     {
-        _strategies = strategies.ToDictionary(
-            s => s.Name.ToLowerInvariant(),
-            s => s
-        );
+        ArgumentNullException.ThrowIfNull(strategies);
+
+        foreach (var strategy in strategies)
+        {
+            if (!_strategies.TryAdd(strategy.Type, strategy))
+                throw new InvalidOperationException($"More than one balance strategy is registered for {strategy.Type}.");
+        }
+
+        // Every strategy clients can choose must have an implementation, or the host fails at startup, not on a request
+        var missing = Enum.GetValues<BalanceStrategyType>().Where(type => !_strategies.ContainsKey(type)).ToList();
+        if (missing.Count > 0)
+            throw new InvalidOperationException($"No balance strategy is registered for: {string.Join(", ", missing)}.");
     }
 
-    public IBalanceStrategy GetStrategy(string strategyName)
+    public IBalanceStrategy GetStrategy(BalanceStrategyType type)
     {
-        if (string.IsNullOrWhiteSpace(strategyName) || !_strategies.TryGetValue(strategyName.ToLowerInvariant(), out var strategy))
-        {
-            throw new DomainValidationException($"Supported strategies include: AddFundsStrategy, SubtractFundsStrategy, ForceSubtractFundsStrategy. Received: '{strategyName}'");
-        }
+        // Only reachable with an undefined value cast from code: the API binds strategies by name
+        if (!_strategies.TryGetValue(type, out var strategy))
+            throw new DomainValidationException($"Supported strategies include: {string.Join(", ", Enum.GetNames<BalanceStrategyType>())}. Received: '{type}'");
+
         return strategy;
     }
 }

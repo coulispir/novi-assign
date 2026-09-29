@@ -3,9 +3,11 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Core.Service.Handlers;
+using Core.Service.Strategies;
 
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.AspNetCore.RateLimiting;
 
 using Wallet.Api.Filters;
@@ -58,7 +60,7 @@ public class WalletController : ControllerBase
     }
 
     // 🛠️ 3. ADJUST WALLET BALANCE ENDPOINT
-    // POST /api/wallets/{walletId}/adjustbalance?amount=50&currency=EUR&strategy=SubtractFundsStrategy
+    // POST /api/wallets/{walletId}/adjustbalance?amount=50&currency=EUR&strategy=SubtractFundsStrategy (a BalanceStrategyType name)
     // Header: Idempotency-Key: <client-generated unique value, e.g. a UUID>
     [HttpPost("{walletId:long}/adjustbalance")]
     [EnableRateLimiting(RateLimitPolicies.WalletAdjust)]
@@ -71,7 +73,7 @@ public class WalletController : ControllerBase
         [FromRoute] long walletId,
         [FromQuery][Required] decimal amount,
         [FromQuery][Required] string currency,
-        [FromQuery][Required] string strategy,
+        [FromQuery][BindRequired] BalanceStrategyType strategy, // BindRequired rejects a missing value, which [Required] can't detect on a value type
         [FromHeader(Name = IdempotencyKeyHeader)] string? idempotencyKey,
         CancellationToken cancellationToken)
     {

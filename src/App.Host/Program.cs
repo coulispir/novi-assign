@@ -24,6 +24,8 @@ using Quartz;
 
 using Serilog;
 
+using Wallet.Api;
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Host.UseSerilog((context, services, configuration) => configuration
@@ -105,13 +107,16 @@ builder.Services.AddTrustedForwardedHeaders(builder.Configuration);
 builder.Services.AddClientIpRateLimiting(builder.Configuration, Wallet.Api.RateLimitPolicies.All);
 
 // Add API Routing Controllers capability and dynamically discover external modules
-builder.Services.AddControllers()
-    .AddApplicationPart(typeof(Wallet.Api.AssemblyReference).Assembly);
+builder.Services.AddWalletApi();
 
 // OpenAPI document generated from the controllers, browsable through Swagger UI in Development
 builder.Services.AddApiDocumentation();
 
 var app = builder.Build();
+
+// Resolve the strategy factory now: it verifies every BalanceStrategyType has exactly one strategy, so a missing
+// registration stops the host at startup instead of failing a client's request
+app.Services.GetRequiredService<Core.Service.Strategies.IBalanceStrategyFactory>();
 
 // Configure HTTP Request Pipeline
 if (app.Environment.IsDevelopment())
