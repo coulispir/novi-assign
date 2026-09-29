@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using App.Host.Infrastructure;
 using App.Host.Infrastructure.Caching;
 using App.Host.Infrastructure.Ecb;
+using App.Host.Infrastructure.Errors;
 using App.Host.Infrastructure.HealthChecks;
 using App.Host.Infrastructure.Jobs;
 using App.Host.Infrastructure.RateLimiting;
@@ -85,16 +86,24 @@ builder.Services.AddWalletApi();
 // OpenAPI document generated from the controllers, browsable through Swagger UI in Development
 builder.Services.AddApiDocumentation();
 
+// Safety net for exceptions thrown outside the controllers: the same error body, never a stack trace
+builder.Services.AddGlobalExceptionHandling();
+
 var app = builder.Build();
 
 // Resolve the strategy factory now: it verifies every BalanceStrategyType has exactly one strategy, so a missing
 // registration stops the host at startup instead of failing a client's request
 app.Services.GetRequiredService<Core.Service.Strategies.IBalanceStrategyFactory>();
 
-// Configure HTTP Request Pipeline
+// Outermost, so an exception anywhere in the pipeline is caught. Development keeps the detailed developer page;
+// every other environment gets the same error body from HttpExceptionHandler, then GenericExceptionHandler.
 if (app.Environment.IsDevelopment())
 {
     app.UseDeveloperExceptionPage();
+}
+else
+{
+    app.UseExceptionHandler();
 }
 
 // Must run first so logging and rate limiting see the real client IP rather than the load balancer's

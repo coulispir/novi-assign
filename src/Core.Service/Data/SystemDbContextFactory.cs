@@ -5,17 +5,24 @@ using Microsoft.EntityFrameworkCore.Design;
 
 namespace Core.Service.Data;
 
+/// <summary>
+/// Creates the context for the <c>dotnet ef</c> tools only; the app itself gets its connection string from configuration.
+/// </summary>
 public class SystemDbContextFactory : IDesignTimeDbContextFactory<SystemDbContext>
 {
+    // The same variable the app reads (ConnectionStrings:DefaultConnection), so one setting serves both
+    public const string ConnectionStringVariable = "ConnectionStrings__DefaultConnection";
+
+    // No credentials, on purpose. Generating migrations never connects, so this is enough for "migrations add";
+    // commands that do connect (e.g. "database update") need the variable above.
+    private const string CredentialFreeFallback = "Server=127.0.0.1;Database=FinancialSystemDb;TrustServerCertificate=True;";
+
     public SystemDbContext CreateDbContext(string[] args)
     {
+        var connectionString = Environment.GetEnvironmentVariable(ConnectionStringVariable);
+
         var optionsBuilder = new DbContextOptionsBuilder<SystemDbContext>();
-
-        // Local fallback string used strictly for design-time file generation tasks.
-        // This does not affect your production runtime docker environment values.
-        const string localFallbackConnectionString = "Server=127.0.0.1;Database=FinancialSystemDb;User Id=sa;Password=YourSecure@Password123;TrustServerCertificate=True;";
-
-        optionsBuilder.UseSqlServer(localFallbackConnectionString, sqlOptions =>
+        optionsBuilder.UseSqlServer(string.IsNullOrWhiteSpace(connectionString) ? CredentialFreeFallback : connectionString, sqlOptions =>
         {
             sqlOptions.MigrationsAssembly("Core.Service");
         });
