@@ -63,10 +63,10 @@ public sealed class BalanceStrategyTests
     [InlineData("")]
     [InlineData(" ")]
     [InlineData("TransferFundsStrategy")]
-    public void Factory_WithUnknownStrategy_ThrowsListingTheSupportedOnes(string strategyName)
+    public void Factory_WithUnknownStrategy_ThrowsValidationErrorListingTheSupportedOnes(string strategyName)
     {
         var resolve = () => _factory.GetStrategy(strategyName);
 
-        resolve.Should().Throw<ArgumentException>().WithMessage("*AddFundsStrategy*SubtractFundsStrategy*ForceSubtractFundsStrategy*");
+        resolve.Should().Throw<DomainValidationException>().WithMessage("*AddFundsStrategy*SubtractFundsStrategy*ForceSubtractFundsStrategy*");
     }
 }

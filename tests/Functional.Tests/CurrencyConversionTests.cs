@@ -52,7 +52,7 @@ public sealed class CurrencyConversionTests
 
         using var response = await _api.GetAsync(wallet.Id, "XYZ");
 
-        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        await response.ShouldBeErrorAsync(HttpStatusCode.BadRequest, "unsupported_currency");
     }
 
     [Fact]

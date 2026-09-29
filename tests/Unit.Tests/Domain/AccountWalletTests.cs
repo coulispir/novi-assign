@@ -1,6 +1,7 @@
 using System;
 
 using Core.Service.Entities;
+using Core.Service.Exceptions;
 
 using FluentAssertions;
 
@@ -28,19 +29,19 @@ public sealed class AccountWalletTests
     [InlineData("  ")]
     [InlineData("EU")]
     [InlineData("EURO")]
-    public void Create_WithInvalidCurrency_Throws(string currency)
+    public void Create_WithInvalidCurrency_ThrowsValidationError(string currency)
     {
         var create = () => AccountWallet.Create(currency, 10m);
 
-        create.Should().Throw<ArgumentException>().WithParameterName("currency");
+        create.Should().Throw<DomainValidationException>().WithMessage("*3-letter ISO code*");
     }
 
     [Fact]
-    public void Create_WithNegativeInitialBalance_Throws()
+    public void Create_WithNegativeInitialBalance_ThrowsValidationError()
     {
         var create = () => AccountWallet.Create("EUR", -0.01m);
 
-        create.Should().Throw<ArgumentException>().WithParameterName("initialBalance");
+        create.Should().Throw<DomainValidationException>().WithMessage("*negative*");
     }
 
     [Fact]
@@ -64,13 +65,13 @@ public sealed class AccountWalletTests
     }
 
     [Fact]
-    public void Debit_BeyondTheBalance_ThrowsAndLeavesTheBalanceUnchanged()
+    public void Debit_BeyondTheBalance_ThrowsInsufficientFundsAndLeavesTheBalanceUnchanged()
     {
         var wallet = AccountWallet.Create("EUR", 10m);
 
         var debit = () => wallet.Debit(10.01m);
 
-        debit.Should().Throw<InvalidOperationException>();
+        debit.Should().Throw<InsufficientFundsException>();
         wallet.Balance.Should().Be(10m);
     }
 
@@ -94,6 +95,8 @@ public sealed class AccountWalletTests
         wallet => wallet.ForceDebit(-1m),
     };
 
+    // Amounts are validated by the handler first, so these guard clauses catch programming errors, not client input,
+    // and stay ArgumentException (a 500) rather than DomainValidationException (a 400)
     [Theory]
     [MemberData(nameof(NonPositiveAmountOperations))]
     public void BalanceOperations_WithNonPositiveAmount_ThrowAndLeaveTheBalanceUnchanged(Action<AccountWallet> operation)

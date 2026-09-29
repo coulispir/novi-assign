@@ -3,6 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Core.Service.Entities;
+using Core.Service.Exceptions;
 using Core.Service.Handlers;
 using Core.Service.Services;
 
@@ -36,11 +37,11 @@ public sealed class WalletHandlerTests
     [Theory]
     [InlineData(0)]
     [InlineData(-5)]
-    public async Task HandleAdjustmentAsync_WithNonPositiveAmount_ThrowsWithoutCallingTheService(decimal amount)
+    public async Task HandleAdjustmentAsync_WithNonPositiveAmount_ThrowsValidationErrorWithoutCallingTheService(decimal amount)
     {
         var handle = () => _handler.HandleAdjustmentAsync(new AdjustBalanceCommand(1, amount, "EUR", "AddFundsStrategy", "key-1"), CancellationToken.None).AsTask();
 
-        await handle.Should().ThrowAsync<ArgumentException>().WithMessage("*positive*");
+        await handle.Should().ThrowAsync<DomainValidationException>().WithMessage("*positive*");
         await AssertServiceNotCalledAsync();
     }
 
@@ -53,11 +54,11 @@ public sealed class WalletHandlerTests
 
     [Theory]
     [MemberData(nameof(InvalidIdempotencyKeys))]
-    public async Task HandleAdjustmentAsync_WithMissingOrOversizedIdempotencyKey_ThrowsWithoutCallingTheService(string idempotencyKey)
+    public async Task HandleAdjustmentAsync_WithMissingOrOversizedIdempotencyKey_ThrowsValidationErrorWithoutCallingTheService(string idempotencyKey)
     {
         var handle = () => _handler.HandleAdjustmentAsync(new AdjustBalanceCommand(1, 5m, "EUR", "AddFundsStrategy", idempotencyKey), CancellationToken.None).AsTask();
 
-        await handle.Should().ThrowAsync<ArgumentException>().WithMessage("*Idempotency-Key*");
+        await handle.Should().ThrowAsync<DomainValidationException>().WithMessage("*Idempotency-Key*");
         await AssertServiceNotCalledAsync();
     }
 

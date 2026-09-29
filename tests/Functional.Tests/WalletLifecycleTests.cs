@@ -38,8 +38,7 @@ public sealed class WalletLifecycleTests
     {
         using var response = await _api.CreateAsync(currency, initialBalance);
 
-        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-        (await response.Content.ReadFromJsonAsync<ErrorDto>())!.Error.Should().NotBeNullOrWhiteSpace();
+        await response.ShouldBeErrorAsync(HttpStatusCode.BadRequest, "invalid_request");
     }
 
     [Fact]
@@ -47,7 +46,7 @@ public sealed class WalletLifecycleTests
     {
         using var response = await _api.GetAsync(long.MaxValue);
 
-        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        await response.ShouldBeErrorAsync(HttpStatusCode.NotFound, "wallet_not_found");
     }
 
     [Fact]
@@ -69,7 +68,7 @@ public sealed class WalletLifecycleTests
 
         using var response = await _api.AdjustAsync(wallet.Id, 20.01m, "EUR", "SubtractFundsStrategy");
 
-        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        await response.ShouldBeErrorAsync(HttpStatusCode.UnprocessableEntity, "insufficient_funds");
         (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(20m);
     }
 
@@ -89,7 +88,7 @@ public sealed class WalletLifecycleTests
 
         using var response = await _api.AdjustAsync(wallet.Id, amount, currency, strategy, idempotencyKey);
 
-        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        await response.ShouldBeErrorAsync(HttpStatusCode.BadRequest, "invalid_request");
         (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(20m);
     }
 
@@ -98,7 +97,7 @@ public sealed class WalletLifecycleTests
     {
         using var response = await _api.AdjustAsync(long.MaxValue, 10m, "EUR", "AddFundsStrategy");
 
-        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        await response.ShouldBeErrorAsync(HttpStatusCode.NotFound, "wallet_not_found");
     }
 
     private async Task AssertAdjustedAsync(long walletId, decimal amount, string strategy, decimal expectedBalance)

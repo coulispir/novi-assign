@@ -73,7 +73,7 @@ Every error the API returns has the same JSON body:
 - **Cancelled requests aren't errors.** If the client disconnects, the filter doesn't log an error or write a response.
 - **Malformed requests are rejected before the action runs.** A missing required query parameter or an unparseable body is rejected by ASP.NET Core's `[ApiController]` model validation. That response is a standard `400` [problem details](https://www.rfc-editor.org/rfc/rfc9457) body, not the shape above.
 
-To add an error: create an exception in `Core.Service/Exceptions`, throw it from the domain code, add a code to [ErrorCodes](src/Apis/Wallet.Api/Models/ErrorResponse.cs), map it in `ApiExceptionFilter`, and add a case to [ErrorResponseTests](tests/Integration.Tests/ErrorHandling/ErrorResponseTests.cs).
+To add an error: create an exception in `Core.Service/Exceptions`, throw it from the domain code, add a code to [ErrorCodes](src/Apis/Wallet.Api/Models/ErrorResponse.cs), map it in `ApiExceptionFilter`, add a case to [ErrorResponseTests](tests/Integration.Tests/ErrorHandling/ErrorResponseTests.cs), and cover it end to end in [Functional.Tests](tests/Functional.Tests).
 
 ## Rate limiting
 
@@ -214,7 +214,7 @@ The tests follow the layers of the code, and each layer is tested with the light
 
 These boot the real `Program.cs` (DI, middleware, migrations) against real SQL Server and Redis containers:
 
-- **Wallet lifecycle:** create, read, each strategy, and every 400 and 404 path. Failed requests leave the balance unchanged.
+- **Wallet lifecycle:** create, read, each strategy, and every error path (400, 404, and 422 for insufficient funds), each checked against its [error code](#errors). Failed requests leave the balance unchanged.
 - **Idempotency and concurrency:** replays, key reuse with a different request (422), parallel retries with the same key applied exactly once, and parallel adjustments never losing an update.
 - **Currency conversion:** the full path from ECB feed to sync job, SQL Server, Redis and the endpoint. Also: rates are served from Redis rather than SQL Server, an empty cache falls back to the database and refills, new rates are served after a sync, and a currency the ECB drops keeps its last rate.
 

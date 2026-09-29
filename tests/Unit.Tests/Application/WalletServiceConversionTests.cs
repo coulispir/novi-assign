@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 
 using Core.Service.Data;
 using Core.Service.Entities;
+using Core.Service.Exceptions;
 using Core.Service.Interfaces;
 using Core.Service.Repositories;
 using Core.Service.Services;
@@ -89,13 +90,13 @@ public sealed class WalletServiceConversionTests : IDisposable
     }
 
     [Fact]
-    public async Task GetConvertedBalanceAsync_WithUnknownTargetCurrency_Throws()
+    public async Task GetConvertedBalanceAsync_WithUnknownTargetCurrency_ThrowsUnsupportedCurrency()
     {
         ArrangeWallet("USD", 100m);
 
         var convert = () => _service.GetConvertedBalanceAsync(1, "XYZ", CancellationToken.None).AsTask();
 
-        await convert.Should().ThrowAsync<InvalidOperationException>().WithMessage("*USD to XYZ*");
+        await convert.Should().ThrowAsync<UnsupportedCurrencyException>().WithMessage("*USD to XYZ*");
     }
 
     [Fact]
@@ -105,7 +106,7 @@ public sealed class WalletServiceConversionTests : IDisposable
 
         var convert = () => _service.GetConvertedBalanceAsync(99, "USD", CancellationToken.None).AsTask();
 
-        await convert.Should().ThrowAsync<KeyNotFoundException>();
+        await convert.Should().ThrowAsync<WalletNotFoundException>();
     }
 
     private void ArrangeWallet(string currency, decimal balance)

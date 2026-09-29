@@ -15,7 +15,7 @@ public sealed record WalletDto(long Id, string Currency, decimal Balance);
 
 public sealed record BalanceDto(long WalletId, decimal OriginalBalance, string OriginalCurrency, decimal RequestedBalance, string RequestedCurrency);
 
-public sealed record ErrorDto(string Error);
+public sealed record ErrorDto(string Error, string Code);
 
 /// <summary>
 /// Thin wrapper over the wallet endpoints, so tests read as API usage rather than HTTP plumbing.
