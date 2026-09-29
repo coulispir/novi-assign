@@ -34,7 +34,7 @@ src/
   Apis/Wallet.Api/   Controllers, response models, RateLimitPolicies (a class library loaded as an application part)
   Core.Service/      Domain and application logic: entities, handlers, services, strategies, repositories,
                      EF DbContext + migrations, Quartz jobs, interfaces for everything external
-  Ecb.Gateway/       HttpClient implementation of IEcbGateway (ECB daily XML feed)
+  Ecb.Gateway/       Standalone ECB client library: IEcbClient -> EcbDailyRates (no project references)
 tests/
   Unit.Tests/        Domain/ (entities, strategies; no mocks) and Application/ (handler, services, job; NSubstitute)
   Integration.Tests/ References App.Host; real Redis via Testcontainers, in-memory TestServer
@@ -45,6 +45,7 @@ Dependencies point inward, towards `Core.Service`:
 
 - `Core.Service` has **no dependency on ASP.NET, Redis or HTTP**. External concerns are interfaces in [Core.Service/Interfaces](src/Core.Service/Interfaces) (`IEcbGateway`, `ICurrencyRatesCache`, ...) implemented elsewhere. Keep it that way: put a new Redis or HTTP implementation in `App.Host/Infrastructure` or a gateway project, not in `Core.Service`.
 - `Wallet.Api` references only `Core.Service`. `App.Host` references everything and wires it up.
+- `Ecb.Gateway` references **no project**: it is a reusable client for the ECB feed, with its own `IEcbClient` and models. [EcbGatewayAdapter](src/App.Host/Infrastructure/Ecb/EcbGatewayAdapter.cs) in `App.Host` maps it to the core's `IEcbGateway` port and adds the EUR base rate (the feed quotes against EUR and doesn't list it). Keep app concepts out of the gateway, and feed-format details out of the core.
 - A new project must be added to [WalletSystem.slnx](WalletSystem.slnx) **and** to the `COPY *.csproj` restore layer in the [Dockerfile](Dockerfile), or the production image won't build.
 
 ## Request flow

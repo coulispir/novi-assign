@@ -7,24 +7,23 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
-using Core.Service.Models;
-
-using Ecb.Gateway.Services;
+using Ecb.Gateway;
+using Ecb.Gateway.Models;
 
 using FluentAssertions;
 
 namespace Integration.Tests.Gateways;
 
 /// <summary>
-/// Parses canned ECB responses through a stubbed HTTP handler, so the adapter is tested against the real feed format
+/// Parses canned ECB responses through a stubbed HTTP handler, so the client is tested against the real feed format
 /// without depending on the network.
 /// </summary>
-public sealed class EcbGatewayTests
+public sealed class EcbClientTests
 {
-    private static readonly DateTime FeedDate = new(2026, 9, 25, 0, 0, 0, DateTimeKind.Unspecified);
+    private static readonly DateOnly FeedDate = new(2026, 9, 25);
 
     [Fact]
-    public async Task ParsesEveryRateFromTheDailyFeedAndAddsTheEuroBase()
+    public async Task ParsesTheDateAndEveryRateOfTheDailyFeed()
     {
         var gateway = CreateGateway(Feed("2026-09-25", """
             <Cube currency="USD" rate="1.1403"/>
@@ -32,15 +31,11 @@ public sealed class EcbGatewayTests
             <Cube currency="GBP" rate="0.86045"/>
             """));
 
-        var rates = (await gateway.FetchDailyRatesAsync()).ToList();
+        var daily = await gateway.GetDailyRatesAsync();
 
-        rates.Should().BeEquivalentTo(
-        [
-            new EcbRateResult("USD", 1.1403m, FeedDate),
-            new EcbRateResult("JPY", 171.23m, FeedDate),
-            new EcbRateResult("GBP", 0.86045m, FeedDate),
-            new EcbRateResult("EUR", 1.0m, FeedDate),
-        ]);
+        // The feed quotes currencies against the euro and doesn't list EUR; the library reports only what it publishes
+        daily.Date.Should().Be(FeedDate);
+        daily.Rates.Should().Equal(new EcbRate("USD", 1.1403m), new EcbRate("JPY", 171.23m), new EcbRate("GBP", 0.86045m));
     }
 
     [Fact]
@@ -53,9 +48,9 @@ public sealed class EcbGatewayTests
             <Cube rate="1.5"/>
             """));
 
-        var rates = await gateway.FetchDailyRatesAsync();
+        var daily = await gateway.GetDailyRatesAsync();
 
-        rates.Select(r => r.CurrencyCode).Should().BeEquivalentTo(["USD", "EUR"]);
+        daily.Rates.Select(r => r.Currency).Should().Equal("USD");
     }
 
     [Fact]
@@ -69,9 +64,9 @@ public sealed class EcbGatewayTests
         {
             var gateway = CreateGateway(Feed("2026-09-25", """<Cube currency="USD" rate="1.1403"/>"""));
 
-            var rates = await gateway.FetchDailyRatesAsync();
+            var daily = await gateway.GetDailyRatesAsync();
 
-            rates.First(r => r.CurrencyCode == "USD").Rate.Should().Be(1.1403m);
+            daily.Rates.Single().Rate.Should().Be(1.1403m);
         }
         finally
         {
@@ -84,12 +79,26 @@ public sealed class EcbGatewayTests
     {
         var gateway = CreateGateway("Service Unavailable", HttpStatusCode.ServiceUnavailable);
 
-        var fetch = () => gateway.FetchDailyRatesAsync();
+        var fetch = () => gateway.GetDailyRatesAsync();
 
         await fetch.Should().ThrowAsync<HttpRequestException>();
     }
 
-    private static EcbGateway CreateGateway(string body, HttpStatusCode status = HttpStatusCode.OK) =>
+    [Fact]
+    public async Task FailsWhenTheFeedHasNoDatedRates()
+    {
+        var gateway = CreateGateway("""
+            <gesmes:Envelope xmlns:gesmes="http://www.gesmes.org/xml/2002-08-01" xmlns="http://www.ecb.int/vocabulary/2002-08-01/eurofxref">
+              <Cube/>
+            </gesmes:Envelope>
+            """);
+
+        var fetch = () => gateway.GetDailyRatesAsync();
+
+        await fetch.Should().ThrowAsync<FormatException>();
+    }
+
+    private static EcbClient CreateGateway(string body, HttpStatusCode status = HttpStatusCode.OK) =>
         new(new HttpClient(new StubHandler(body, status)));
 
     private static string Feed(string date, string currencyCubes) => $"""

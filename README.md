@@ -156,11 +156,13 @@ The Redis connection string is `ConnectionStrings:Redis`, set to `redis:6379` in
 
 ## ECB rate sync
 
-[EcbSyncJob](src/Core.Service/Jobs/EcbSyncJob.cs) runs every minute (Quartz, on one node per trigger). It fetches the daily ECB feed through the [Ecb.Gateway](src/Ecb.Gateway/Services/EcbGateway.cs) library, saves the rates to SQL Server, then refreshes the [currency rates cache](#currency-rates-cache).
+[EcbSyncJob](src/Core.Service/Jobs/EcbSyncJob.cs) runs every minute (Quartz, on one node per trigger). It fetches the daily ECB feed through the [Ecb.Gateway](src/Ecb.Gateway/EcbClient.cs) library, saves the rates to SQL Server, then refreshes the [currency rates cache](#currency-rates-cache).
 
 ```
-ECB feed ──► EcbGateway (typed EcbRateResult) ──► EcbRatesService (validate, de-duplicate) ──► one MERGE ──► CurrencyValues
+ECB feed ──► EcbClient (Ecb.Gateway: EcbDailyRates) ──► EcbGatewayAdapter (+ EUR, EcbRateResult) ──► EcbRatesService (validate, de-duplicate) ──► one MERGE ──► CurrencyValues
 ```
+
+**The gateway is a standalone library.** `Ecb.Gateway` references no other project. It exposes `IEcbClient`, which returns the feed as typed objects (`EcbDailyRates`: the publication date and each `EcbRate`), so any application could use it. The core doesn't depend on it either: `Core.Service` defines the `IEcbGateway` port it needs, and [EcbGatewayAdapter](src/App.Host/Infrastructure/Ecb/EcbGatewayAdapter.cs) in the host connects the two. The adapter also adds EUR at 1, because every ECB rate is quoted against the euro and the feed doesn't list EUR itself.
 
 `CurrencyValues` keeps **one row per currency per date**, so it holds the full history of rates. A new day adds rows; the same day again updates them.
 

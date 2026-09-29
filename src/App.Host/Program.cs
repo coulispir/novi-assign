@@ -57,11 +57,14 @@ builder.Services.AddDbContext<SystemDbContext>(options =>
     }));
 
 // Register the external integration gateway using HttpClient factory pattern rules
-builder.Services.AddHttpClient<IEcbGateway, Ecb.Gateway.Services.EcbGateway>(client =>
+builder.Services.AddHttpClient<Ecb.Gateway.IEcbClient, Ecb.Gateway.EcbClient>(client =>
 {
     client.Timeout = TimeSpan.FromSeconds(15);
     client.DefaultRequestHeaders.Add("User-Agent", "WalletManagementSystem/1.0");
 });
+
+// The core's IEcbGateway port, implemented over the standalone gateway library
+builder.Services.AddScoped<IEcbGateway, App.Host.Infrastructure.Ecb.EcbGatewayAdapter>();
 
 // Register application services and data repositories
 builder.Services.AddScoped<ICurrencyValueRepository, CurrencyValueRepository>();
