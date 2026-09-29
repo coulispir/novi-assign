@@ -34,7 +34,7 @@ src/
   Apis/Wallet.Api/   Controllers, response models, RateLimitPolicies (a class library loaded as an application part)
   Core.Service/      Domain and application logic: entities, handlers, services, strategies, repositories,
                      EF DbContext + migrations, Quartz jobs, interfaces for everything external
-  Ecb.Gateway/       HttpClient implementation of IEcbGateway (ECB daily XML feed)
+  Ecb.Gateway/       Standalone ECB client library: IEcbClient -> EcbDailyRates (no project references)
 tests/
   Unit.Tests/        Domain/ (entities, strategies; no mocks) and Application/ (handler, services, job; NSubstitute)
   Integration.Tests/ References App.Host; real Redis via Testcontainers, in-memory TestServer
@@ -45,6 +45,7 @@ Dependencies point inward, towards `Core.Service`:
 
 - `Core.Service` has **no dependency on ASP.NET, Redis or HTTP**. External concerns are interfaces in [Core.Service/Interfaces](src/Core.Service/Interfaces) (`IEcbGateway`, `ICurrencyRatesCache`, ...) implemented elsewhere. Keep it that way: put a new Redis or HTTP implementation in `App.Host/Infrastructure` or a gateway project, not in `Core.Service`.
 - `Wallet.Api` references only `Core.Service`. `App.Host` references everything and wires it up.
+- `Ecb.Gateway` references **no project**: it is a reusable client for the ECB feed, with its own `IEcbClient` and models. [EcbGatewayAdapter](src/App.Host/Infrastructure/Ecb/EcbGatewayAdapter.cs) in `App.Host` maps it to the core's `IEcbGateway` port and adds the EUR base rate (the feed quotes against EUR and doesn't list it). Keep app concepts out of the gateway, and feed-format details out of the core.
 - A new project must be added to [WalletSystem.slnx](WalletSystem.slnx) **and** to the `COPY *.csproj` restore layer in the [Dockerfile](Dockerfile), or the production image won't build.
 
 ## Request flow
@@ -127,11 +128,13 @@ Rules:
 
 **Redis**: exactly one shared `IConnectionMultiplexer`, registered by `AddRedis` ([RedisServiceCollectionExtensions.cs](src/App.Host/Infrastructure/RedisServiceCollectionExtensions.cs)) with `AbortOnConnectFail = false` and `BacklogPolicy.FailFast`. Any new Redis feature must resolve this instance, not open its own connection.
 
+**Decorators**: cross-cutting behaviour wraps an interface instead of being added to its implementation. [LoggingEcbGatewayDecorator](src/Core.Service/Decorators/LoggingEcbGatewayDecorator.cs) times and logs `IEcbGateway`, and `FailOpenRateLimiter` makes the Redis limiter fail open. With the built-in container, register the inner type as itself and the interface as a factory that wraps it (see `AddEcbGateway`); there's no Scrutor or Autofac. A decorator must pass results and exceptions through unchanged. Tests that replace the interface (e.g. `WalletApiFactory` swapping in `FakeEcbFeed`) replace the whole chain.
+
 **Fail open**: Redis is an optimisation, never a hard dependency. Rate limiting ([FailOpenRateLimiter.cs](src/App.Host/Infrastructure/RateLimiting/FailOpenRateLimiter.cs)) and the rates cache ([RedisCurrencyRatesCache.cs](src/App.Host/Infrastructure/Caching/RedisCurrencyRatesCache.cs)) catch `RedisException or RedisTimeoutException`, log a warning and carry on. New Redis code should do the same. The warning messages (`Rate limiter store is unavailable`, `Currency rates cache is unavailable`) are meant to be alerted on, so don't reword them casually.
 
 **Redis keys**: version the key when the format changes (`currency-rates:latest:v1`), always set a TTL, and use `MULTI/EXEC` transactions for multi-step writes. Rate limit keys use hash tags for Redis Cluster; that is why route braces are stripped from the partition key.
 
-**Currency rates**: `EcbSyncJob` runs every minute on **one node** (Quartz clustered SQL Server job store, `[DisallowConcurrentExecution]`). It saves rates with **one raw SQL `MERGE`** ([CurrencyValueRepository.MergeRatesAsync](src/Core.Service/Repositories/CurrencyValueRepository.cs); the assignment requires this). It's keyed on `(CurrencyCode, RateDate)`, so it keeps one row per currency per date (the history). It then rebuilds the Redis snapshot from the database on every run, even when nothing changed. Reads go through `CurrencyRatesProvider`: Redis first; on a miss, the database, then `AddIfMissingAsync` (a `WATCH`-guarded fill that never overwrites a fresher snapshot). Don't add an in-process cache (`IMemoryCache`, `HybridCache`): other nodes would serve stale rates. The README explains why.
+**Currency rates**: `EcbSyncJob` runs every `EcbSync:Interval` (1 minute by default) on **one node** (Quartz clustered SQL Server job store, `[DisallowConcurrentExecution]`). It saves rates with **one raw SQL `MERGE`** ([CurrencyValueRepository.MergeRatesAsync](src/Core.Service/Repositories/CurrencyValueRepository.cs); the assignment requires this). It's keyed on `(CurrencyCode, RateDate)`, so it keeps one row per currency per date (the history). It then rebuilds the Redis snapshot from the database on every run, even when nothing changed. Reads go through `CurrencyRatesProvider`: Redis first; on a miss, the database, then `AddIfMissingAsync` (a `WATCH`-guarded fill that never overwrites a fresher snapshot). Don't add an in-process cache (`IMemoryCache`, `HybridCache`): other nodes would serve stale rates. The README explains why.
 
 **Rate persistence rules**: don't write `CurrencyValues` through tracked EF entities (`Add` / `SaveChanges`); keep all rate writes in the single `MERGE`. Only ever pass values to it as typed `SqlParameter`s, never concatenate them into the SQL. Feed `MergeRatesAsync` validated, de-duplicated rows (one per `(CurrencyCode, RateDate)`), as `EcbRatesService` does. If a column of `CurrencyValues` changes, update the MERGE SQL too; [CurrencyRatesMergeTests](tests/Functional.Tests/CurrencyRatesMergeTests.cs) runs it against real SQL Server.
 
@@ -145,7 +148,9 @@ Rules:
 
 **Configuration and options**
 - Connection strings (`DefaultConnection`, `Redis`) come from environment variables (`ConnectionStrings__X`) and are read with `GetRequiredConnectionString`, which throws at startup if they are missing. Never commit real secrets.
-- Options classes: `sealed`, a `SectionName` const, `init` properties with **no defaults** (missing config should fail), an `internal bool IsValid()`, registered with `.Bind(...).Validate(...).ValidateOnStart()` inside an `IServiceCollection` extension method (`AddXxx`) in `App.Host/Infrastructure`. Add a case to [StartupValidationTests.cs](tests/Integration.Tests/StartupValidationTests.cs).
+- Options classes: `sealed`, a `SectionName` const, `init` properties with **no defaults** (missing config should fail), an `internal bool IsValid()`, registered with `.Bind(...).Validate(...).ValidateOnStart()` inside an `IServiceCollection` extension method (`AddXxx`) in `App.Host/Infrastructure`. Add a case to [StartupValidationTests.cs](tests/Integration.Tests/StartupValidationTests.cs), or to the feature's own configuration tests (e.g. [EcbConfigurationTests](tests/Integration.Tests/Gateways/EcbConfigurationTests.cs)).
+- Don't hard-code tunables such as URLs, timeouts or intervals: add them to an options class and `appsettings.json`. A value needed *while services are registered*, such as the Quartz trigger interval, can't use `ValidateOnStart`. Read and validate it in the `AddXxx` method and throw a message naming the setting, as `AddEcbSyncJob` and `GetRequiredConnectionString` do.
+- Options classes of a reusable library (e.g. `Ecb.Gateway`'s `EcbClientOptions`) live in the library and stay plain. The host binds and validates them.
 
 **DI lifetimes**: services, repositories and handlers are scoped (they use the `DbContext`); strategies, the factory and the Redis cache are singletons. Outbound HTTP uses typed `AddHttpClient<TInterface, TImpl>`.
 
