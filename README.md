@@ -210,6 +210,15 @@ dotnet test                                # everything; Docker must be running
 dotnet test tests/Unit.Tests               # unit tests only: no Docker, well under a second
 ```
 
+### CI
+
+[GitHub Actions](.github/workflows/ci.yml) runs on every pull request to `master` and every push to `master`, with two jobs in parallel:
+
+- **Build and test** builds in Release (warnings are errors, so the analysers and code style are enforced too) and runs all three test projects. The integration and functional tests start Redis and SQL Server with Testcontainers, using the runner's Docker. The run page shows a coverage summary (line and branch coverage per assembly, excluding test projects and EF migrations). It's informational: there's no minimum. If tests fail, the TRX results and coverage files are attached to the run as the `test-results` artifact.
+- **Docker image** builds the production [Dockerfile](Dockerfile) without pushing it, so a broken image (e.g. a new project missing from the restore layer) fails the PR.
+
+A new push to the same PR cancels the run it replaces. To make the checks mandatory, require both jobs in a branch protection rule for `master`.
+
 The tests follow the layers of the code, and each layer is tested with the lightest setup that can still catch its bugs:
 
 | Project | What it tests | Real dependencies |

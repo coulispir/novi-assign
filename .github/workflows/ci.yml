@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same branch or PR cancels the run it makes obsolete
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      # setup-dotnet's built-in cache needs NuGet lock files, which the repo doesn't use
+      - uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', '**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore WalletSystem.slnx
+
+      # Warnings are errors (Directory.Build.props), so this also enforces the analysers and code style
+      - name: Build
+        run: dotnet build WalletSystem.slnx --configuration Release --no-restore
+
+      # Integration and functional tests start Redis and SQL Server with Testcontainers, using the runner's Docker
+      - name: Test
+        run: >-
+          dotnet test WalletSystem.slnx
+          --configuration Release
+          --no-build
+          --logger trx
+          --results-directory TestResults
+          --collect:"XPlat Code Coverage"
+
+      - name: Coverage report
+        if: always()
+        uses: danielpalme/ReportGenerator-GitHub-Action@5
+        with:
+          reports: TestResults/*/coverage.cobertura.xml # The TRX logger also copies each file into In/; read the originals only
+          targetdir: CoverageReport
+          reporttypes: MarkdownSummaryGithub
+          assemblyfilters: -*.Tests
+          classfilters: -Core.Service.Migrations.*
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f CoverageReport/SummaryGithub.md ]; then
+            cat CoverageReport/SummaryGithub.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: TestResults
+          retention-days: 7
+
+  # Builds the production image without pushing it, e.g. to catch a project missing from the Dockerfile's restore layer
+  docker-image:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
