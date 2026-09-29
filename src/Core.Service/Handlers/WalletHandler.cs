@@ -3,6 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Core.Service.Entities;
+using Core.Service.Exceptions;
 using Core.Service.Services;
 
 namespace Core.Service.Handlers;
@@ -36,10 +37,10 @@ public class WalletHandler : IWalletHandler
     public async ValueTask<WalletAdjustmentResult> HandleAdjustmentAsync(AdjustBalanceCommand command, CancellationToken cancellationToken)
     {
         if (command.Amount <= 0)
-            throw new ArgumentException("The amount parameter must always be a positive number.");
+            throw new DomainValidationException("The amount parameter must always be a positive number.");
 
         if (string.IsNullOrWhiteSpace(command.IdempotencyKey) || command.IdempotencyKey.Length > IdempotencyRecord.MaxKeyLength)
-            throw new ArgumentException($"The Idempotency-Key header is required and must be at most {IdempotencyRecord.MaxKeyLength} characters.");
+            throw new DomainValidationException($"The Idempotency-Key header is required and must be at most {IdempotencyRecord.MaxKeyLength} characters.");
 
         return await _walletService.AdjustBalanceAsync(command.WalletId, command.Amount, command.Currency, command.Strategy, command.IdempotencyKey, cancellationToken);
     }

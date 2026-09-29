@@ -44,12 +44,43 @@ Things to know:
 - **The image doesn't hot reload.** It's built once, so rebuild with `--build` after code changes.
 - **Switch back to the hot-reload setup** with `docker compose up -d --remove-orphans`.
 
+## Errors
+
+Every error the API returns has the same JSON body:
+
+```json
+{ "error": "Wallet lacks sufficient funds to complete this operation.", "code": "insufficient_funds" }
+```
+
+`code` is stable, so clients should branch on it. `error` is a human-readable message and may change.
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `invalid_request` | Invalid input: non-positive amount, missing or too long `Idempotency-Key`, bad currency code, negative initial balance, unknown strategy, currency not matching the wallet |
+| 400 | `unsupported_currency` | No exchange rate is known for the requested conversion |
+| 404 | `wallet_not_found` | The wallet doesn't exist |
+| 409 | `concurrency_conflict` | Another request changed the wallet at the same time. Retry with the same `Idempotency-Key` |
+| 422 | `insufficient_funds` | `SubtractFundsStrategy` would take the balance below zero |
+| 422 | `idempotency_key_reused` | The `Idempotency-Key` was already used for a different request |
+| 429 | `rate_limited` | Rate limit exceeded; see [Rate limiting](#rate-limiting) |
+| 500 | `internal_error` | Anything unexpected. The details are logged, never returned |
+
+### How it works
+
+- **One place maps exceptions to responses.** [ApiExceptionFilter](src/Apis/Wallet.Api/Filters/ApiExceptionFilter.cs) is applied to `WalletController`, so the actions only handle the success path. `Core.Service` throws domain exceptions ([Core.Service/Exceptions](src/Core.Service/Exceptions)) and knows nothing about HTTP.
+- **Only expected failures are 4xx.** Anything not in the table, such as a SQL Server outage or a bug, is a `500` with a generic message. Clients aren't told it's their fault, monitoring sees a server error, and internal details (e.g. SQL error text) never reach the response. The exception is logged as `Unhandled exception while processing {Method} {Path}`.
+- **Client errors have their own exception type.** Input the client got wrong throws `DomainValidationException`. `ArgumentException` stays for guard clauses that catch programming errors, and those are `500`s.
+- **Cancelled requests aren't errors.** If the client disconnects, the filter doesn't log an error or write a response.
+- **Malformed requests are rejected before the action runs.** A missing required query parameter or an unparseable body is rejected by ASP.NET Core's `[ApiController]` model validation. That response is a standard `400` [problem details](https://www.rfc-editor.org/rfc/rfc9457) body, not the shape above.
+
+To add an error: create an exception in `Core.Service/Exceptions`, throw it from the domain code, add a code to [ErrorCodes](src/Apis/Wallet.Api/Models/ErrorResponse.cs), map it in `ApiExceptionFilter`, and add a case to [ErrorResponseTests](tests/Integration.Tests/ErrorHandling/ErrorResponseTests.cs).
+
 ## Rate limiting
 
 Each client IP can make a limited number of requests per time window to each endpoint. Requests over the limit are rejected with `429 Too Many Requests`, a `Retry-After` header (seconds) and a JSON body:
 
 ```json
-{ "error": "Too many requests. Please retry later." }
+{ "error": "Too many requests. Please retry later.", "code": "rate_limited" }
 ```
 
 To see every limit in action against a running stack, run `tests/rate-limit.sh` (optionally passing a base URL; the default is `http://localhost:5000`).
@@ -124,7 +155,7 @@ GET /api/wallets/{id}?currency=X ──► Redis ──hit──► convert
 - **The snapshot is a single hash** at `currency-rates:latest:v1`, mapping each currency code to its latest rate against EUR. Reading it is one `HGETALL` of about 30 small fields. The `v1` suffix lets a future format change roll out without old and new nodes misreading each other's data.
 - **The job refreshes the cache on every run**, right after saving rates to SQL Server, even when no rate changed. The snapshot is rebuilt from the database (the latest rate for each currency), not from the ECB payload, so the cache always matches the database. It is replaced atomically in one `MULTI/EXEC` transaction: readers never see a half-written snapshot, and currencies no longer in the database are dropped. Because every run rewrites it, the cache recovers within one job interval after a Redis restart, eviction or outage.
 - **Cache misses read through, without a race.** On a miss (for example at first startup, before the job has run), the request reads the rates from SQL Server and writes them to Redis **only if the key still doesn't exist** (a `WATCH`-based transaction). If the job writes a fresher snapshot while a request is still reading the database, the request's older data is discarded instead of overwriting it.
-- **Unknown currencies never reach the database.** The snapshot holds every currency, so a currency missing from it has no rate, and the request fails with `400` without a database query.
+- **Unknown currencies never reach the database.** The snapshot holds every currency, so a currency missing from it has no rate, and the request fails with `400` (`unsupported_currency`) without a database query.
 - **Fails open.** If Redis is unreachable, requests read rates from SQL Server and a warning is logged (`Currency rates cache is unavailable`), rather than failing. As with rate limiting, Redis commands fail immediately while disconnected, so an outage adds no latency.
 
 ### Configuration
@@ -162,7 +193,7 @@ The tests follow the layers of the code, and each layer is tested with the light
 
 ### Unit tests
 
-- **Domain:** wallet creation and credit/debit/force-debit rules, currency rate validation, each balance strategy, and strategy lookup.
+- **Domain:** wallet creation and credit/debit/force-debit rules, currency rate validation, each balance strategy, and strategy lookup, including which domain exception each rule throws (see [Errors](#errors)).
 - **Application:**
   - the ECB upsert (insert, update, skip unchanged, de-duplicate, empty feed);
   - conversion maths through EUR, including rounding;
@@ -177,6 +208,7 @@ The tests follow the layers of the code, and each layer is tested with the light
 - **Currency rates cache** runs the production cache registrations against Redis. It covers exact decimal round-trips, atomic replacement, the conditional read-through fill, the TTL, unreadable data, and failing open.
 - **ECB gateway** parses canned feed responses: every rate plus the EUR base, malformed entries, parsing independent of culture, and error statuses.
 - **Startup validation** checks that bad trusted-proxy settings and missing connection strings stop the host.
+- **Error handling** hosts the real `WalletController` with a handler that throws. It checks that each domain exception returns its status code and `code`, and that unexpected exceptions (including a stray `ArgumentException`) return a generic `500` without leaking the exception message. No Redis or database needed.
 
 ### Functional tests
 

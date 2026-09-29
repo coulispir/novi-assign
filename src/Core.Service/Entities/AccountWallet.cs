@@ -1,5 +1,7 @@
 using System;
 
+using Core.Service.Exceptions;
+
 namespace Core.Service.Entities;
 
 public class AccountWallet
@@ -16,10 +18,10 @@ public class AccountWallet
     public static AccountWallet Create(string currency, decimal initialBalance = 0)
     {
         if (string.IsNullOrWhiteSpace(currency) || currency.Length != 3)
-            throw new ArgumentException("Currency must be a valid 3-letter ISO code.", nameof(currency));
+            throw new DomainValidationException("Currency must be a valid 3-letter ISO code.");
 
         if (initialBalance < 0)
-            throw new ArgumentException("Initial balance cannot be negative.", nameof(initialBalance));
+            throw new DomainValidationException("Initial balance cannot be negative.");
 
         return new AccountWallet
         {
@@ -45,7 +47,7 @@ public class AccountWallet
             throw new ArgumentException("Debit amount must be positive.", nameof(amount));
 
         if (Balance - amount < 0)
-            throw new InvalidOperationException("Insufficient funds to complete this transaction.");
+            throw new InsufficientFundsException("Wallet lacks sufficient funds to complete this operation.");
 
         Balance -= amount;
         UpdatedAt = DateTime.UtcNow;

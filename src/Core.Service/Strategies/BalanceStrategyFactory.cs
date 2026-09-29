@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
+using Core.Service.Exceptions;
+
 namespace Core.Service.Strategies;
 
 public interface IBalanceStrategyFactory
@@ -25,7 +27,7 @@ public class BalanceStrategyFactory : IBalanceStrategyFactory
     {
         if (string.IsNullOrWhiteSpace(strategyName) || !_strategies.TryGetValue(strategyName.ToLowerInvariant(), out var strategy))
         {
-            throw new ArgumentException($"Supported strategies include: AddFundsStrategy, SubtractFundsStrategy, ForceSubtractFundsStrategy. Received: '{strategyName}'");
+            throw new DomainValidationException($"Supported strategies include: AddFundsStrategy, SubtractFundsStrategy, ForceSubtractFundsStrategy. Received: '{strategyName}'");
         }
         return strategy;
     }

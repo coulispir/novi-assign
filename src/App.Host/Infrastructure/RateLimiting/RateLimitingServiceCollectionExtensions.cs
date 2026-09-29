@@ -136,7 +136,7 @@ public static class RateLimitingServiceCollectionExtensions
             httpContext.Request.Path);
 
         await httpContext.Response.WriteAsJsonAsync(
-            new { error = "Too many requests. Please retry later." },
+            new { error = "Too many requests. Please retry later.", code = "rate_limited" },
             cancellationToken).ConfigureAwait(false);
     }
 }
