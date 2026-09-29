@@ -2,7 +2,48 @@
 
 Wallet management API (ASP.NET Core, .NET 10) backed by SQL Server, with ECB exchange rate synchronisation via Quartz, a Redis cache of the latest rates, and per-client rate limiting via Redis.
 
+## Assignment coverage
+
+Every task of the NoviCode assignment, where it's implemented and where it's tested:
+
+| Requirement | Implementation | Tests |
+|---|---|---|
+| **Task 1**: gateway library, ECB feed → strongly typed objects | Standalone `Ecb.Gateway` project: [EcbClient](src/Ecb.Gateway/EcbClient.cs) → `EcbDailyRates`, adapted to the core by [EcbGatewayAdapter](src/App.Host/Infrastructure/Ecb/EcbGatewayAdapter.cs) ([details](#ecb-rate-sync)) | [EcbClientTests](tests/Integration.Tests/Gateways/EcbClientTests.cs), `EcbGatewayAdapterTests` |
+| **Task 2**: job every minute, one rate per currency per date (update or insert) | Quartz [EcbSyncJob](src/Core.Service/Jobs/EcbSyncJob.cs), clustered so it runs on one node; interval from `EcbSync:Interval` | [EcbRatesServiceTests](tests/Unit.Tests/Application/EcbRatesServiceTests.cs), `EcbSyncJobTests`, [EcbConfigurationTests](tests/Integration.Tests/Gateways/EcbConfigurationTests.cs) |
+| **Task 2**: persist with raw SQL `MERGE`, all changes in one transaction | One parameterised `MERGE INTO CurrencyValues WITH (HOLDLOCK)` in [CurrencyValueRepository](src/Core.Service/Repositories/CurrencyValueRepository.cs) | [CurrencyRatesMergeTests](tests/Functional.Tests/CurrencyRatesMergeTests.cs) (real SQL Server) |
+| **Task 3**: wallet `Id` (long), `Balance` (decimal), `Currency` (string) | [AccountWallet](src/Core.Service/Entities/AccountWallet.cs) | `AccountWalletTests` |
+| **Task 3**: create wallet; `GET /api/wallets/{walletId}?currency=`; `POST /api/wallets/{walletId}/adjustbalance?amount=&currency=&strategy=` | [WalletController](src/Apis/Wallet.Api/Controllers/WalletController.cs), exactly these routes | [WalletLifecycleTests](tests/Functional.Tests/WalletLifecycleTests.cs) |
+| **Task 3**: positive amount; `AddFundsStrategy`, `SubtractFundsStrategy` (throws on insufficient funds), `ForceSubtractFundsStrategy` | Strategy pattern, resolved by [BalanceStrategyFactory](src/Core.Service/Strategies/BalanceStrategyFactory.cs) from the `BalanceStrategyType` enum | [BalanceStrategyTests](tests/Unit.Tests/Domain/BalanceStrategyTests.cs), `WalletHandlerTests` |
+| **Task 3**: conversion between the wallet's currency and the requested one | [CurrencyConverter](src/Core.Service/Services/CurrencyConverter.cs), for balance display and for [adjustments in another currency](#adjustments-in-another-currency) | `CurrencyConverterTests`, [CurrencyConversionTests](tests/Functional.Tests/CurrencyConversionTests.cs) |
+| **Bonus 1**: rates cache, refreshed by every job run | Redis snapshot ([RedisCurrencyRatesCache](src/App.Host/Infrastructure/Caching/RedisCurrencyRatesCache.cs)), read through [CurrencyRatesProvider](src/Core.Service/Services/CurrencyRatesProvider.cs) ([details](#currency-rates-cache)) | [RedisCurrencyRatesCacheTests](tests/Integration.Tests/Caching/RedisCurrencyRatesCacheTests.cs), `CurrencyRatesProviderTests` |
+| **Bonus 2**: per-client-IP rate limit per endpoint | ASP.NET Core rate limiting with Redis-backed fixed windows ([details](#rate-limiting)) | [RateLimitingTests](tests/Integration.Tests/RateLimiting/RateLimitingTests.cs) |
+| **Tech stack**: .NET 5+, Entity Framework, Options pattern, Quartz, xUnit | .NET 10, EF Core + SQL Server, validated options (e.g. [AddEcbGateway](src/App.Host/Infrastructure/Ecb/EcbServiceCollectionExtensions.cs)), Quartz, xUnit + NSubstitute + FluentAssertions | `EcbConfigurationTests`, `StartupValidationTests` |
+| **Patterns**: interfaces + implementations, Decorator, Factory | Ports in `Core.Service/Interfaces`; Decorators [LoggingEcbGatewayDecorator](src/Core.Service/Decorators/LoggingEcbGatewayDecorator.cs) and [FailOpenRateLimiter](src/App.Host/Infrastructure/RateLimiting/FailOpenRateLimiter.cs); Factory `BalanceStrategyFactory`; Strategy; Adapter | [LoggingEcbGatewayDecoratorTests](tests/Unit.Tests/Application/LoggingEcbGatewayDecoratorTests.cs), `BalanceStrategyTests` |
+
+Beyond the brief: optional [idempotent adjustments](#idempotent-adjustments-optional), optimistic concurrency, a single [error contract](#errors), [OpenAPI + Swagger UI](#api-documentation), a [load-balanced setup](#load-balanced-setup), about 200 tests across unit, integration and functional suites, and [CI](#ci).
+
+## Architecture
+
+```
+src/
+  Apis/Wallet.Api     Controllers, request/response models, error mapping (references Core.Service only)
+  Core.Service        Domain and application logic: entities, strategies, services, EF Core + migrations,
+                      the Quartz job, and the ports (interfaces) for everything external
+  Ecb.Gateway         Standalone ECB feed client (references no other project)
+  App.Host            Composition root: Program.cs, DI, middleware, configuration, and the adapters
+                      that implement the core's ports (Redis cache, rate limiting, ECB adapter)
+tests/
+  Unit.Tests          Domain and application logic, no infrastructure
+  Integration.Tests   Adapters against real Redis (Testcontainers), HTTP pipeline in memory
+  Functional.Tests    The real Program.cs against real SQL Server and Redis containers
+```
+
+Dependencies point inward: `Core.Service` depends on no web framework, Redis or HTTP client, and `Ecb.Gateway` knows nothing about this application. At runtime every replica is stateless; shared state lives in SQL Server (wallets, rates, the Quartz cluster) and Redis (rates snapshot, rate limit counters).
+
+
 ## Running locally
+
+**Prerequisites:** Docker (Desktop, or Engine with Compose v2) to run the app. To run the tests you also need the [.NET 10 SDK](https://dotnet.microsoft.com/download), and Docker running for the integration and functional tests.
 
 ```bash
 cp .env.sample .env
@@ -327,6 +368,32 @@ A few design choices keep these tests reliable:
 - **Tests never depend on each other's data.** Each creates its own wallets, and each test that changes rates owns one currency (see [FakeEcbFeed](tests/Functional.Tests/Infrastructure/FakeEcbFeed.cs)). No database reset is needed between tests.
 - **The tests keep their own copies of the response contracts**, so renaming an API property breaks them the same way it would break clients.
 - **Test logs go to the test project's `bin/.../logs/`**, not `src/App.Host/logs`.
+
+## Design decisions and trade-offs
+
+The main calls, and what each one trades away:
+
+- **Built for several replicas from the start.** All shared state is in SQL Server or Redis, never in process memory. The price is a Redis dependency, which the app tolerates being down (below).
+- **Standalone gateway behind a port.** `Ecb.Gateway` is a reusable library, and the core defines the `IEcbGateway` port it needs, joined by an adapter in the host. That's one extra class, but each side can change or be replaced independently.
+- **Raw SQL `MERGE` for rates**, as the brief asks: one round trip and one transaction per sync, `HOLDLOCK` against concurrent inserts, parameters only. EF tracked entities would be simpler but make many statements.
+- **Redis snapshot, not an in-process cache.** All replicas see new rates as soon as the job finishes. The trade-off is a network hop per conversion; an in-process L1 cache is the next step if that ever matters.
+- **Fail open when Redis is down.** Rate limiting and the cache degrade (no limits, database reads) instead of failing requests. This favours availability; for endpoints where abuse is worse than downtime, fail closed instead.
+- **Fixed-window rate limiting.** It uses constant memory and gives an exact `Retry-After`, at the cost of allowing a burst of up to twice the limit across a window boundary. A sliding window would smooth that at more cost per request.
+- **Optimistic concurrency on wallets** (a SQL Server row version) rather than locks: no blocking, and a conflicting update gets `409` instead of silently losing money.
+- **Optional idempotency.** The endpoint works exactly as specified; an `Idempotency-Key` adds safe retries, stored in the same transaction as the balance change.
+- **Strategies as an enum plus a Factory.** The allowed values are in the API contract (Swagger dropdown, typed clients), and the factory checks at startup that every value has exactly one implementation.
+- **One error shape.** Every failure, including framework validation, returns `{ "error", "code" }` with a stable `code`, and unexpected errors never leak internals.
+- **Tests at three levels, with real infrastructure where it matters.** Behaviour that depends on SQL Server (row versions, unique keys, `MERGE`) is tested against a real SQL Server container, not EF's in-memory provider, which wouldn't enforce any of it.
+
+## Known limitations and next steps
+
+What a production version would add, roughly in priority order:
+
+1. **A transaction ledger.** Adjustments change the wallet's balance directly; there's no history of credits and debits. A real wallet would record every adjustment in an append-only ledger (amount, currency, rate used, strategy, idempotency key), with the balance derived from it or reconciled against it. That enables audits, statements and dispute handling.
+2. **Authentication and authorisation.** Any client can read or adjust any wallet. Next: authenticate callers, check wallet ownership, and key rate limits on the user or API key instead of the IP.
+3. **Health checks and observability.** Add `/health` covering SQL Server and Redis for the load balancer, plus metrics (request rates, `429`s, cache hit ratio, sync duration and failures) and distributed tracing.
+4. **Deployment.** Run migrations as a separate deployment step rather than at startup, publish the Docker image from CI, and use a secret store and a least-privilege SQL login. See [Production considerations](#production-considerations).
+5. **Rates when none are synced yet.** Right after the very first start, before the first sync, conversions return `400 unsupported_currency`. `503` with `Retry-After` would describe that better.
 
 ## Production considerations
 
