@@ -22,6 +22,9 @@ tests/rate-limit.sh [base-url]    # exercises every rate limit
 
 # New EF Core migration (needs the dotnet-ef tool; the design-time factory lives in Core.Service)
 dotnet ef migrations add <Name> --project src/Core.Service
+# Commands that connect (database update, migrations list) need the same connection string the app uses:
+ConnectionStrings__DefaultConnection="Server=127.0.0.1,1433;Database=FinancialSystemDb;User Id=sa;Password=<DB_PASSWORD from .env>;TrustServerCertificate=True;" \
+  dotnet ef database update --project src/Core.Service
 ```
 
 Migrations are applied automatically at startup ([Program.cs](src/App.Host/Program.cs)), which also creates the database if it is missing.
@@ -88,6 +91,8 @@ Every error body is `{ "error": "<message>", "code": "<stable code>" }` ([ErrorR
 | rate limited (middleware, not the filter) | 429 | `rate_limited` |
 | **anything else** | 500 | `internal_error`, generic message, exception logged |
 
+Outside the controllers, `UseExceptionHandler()` (the outermost middleware outside Development) tries the `IExceptionHandler`s registered by `AddGlobalExceptionHandling()`, **in order**: [HttpExceptionHandler](src/App.Host/Infrastructure/Errors/HttpExceptionHandler.cs) (a `BadHttpRequestException` keeps its own 4xx), then [GenericExceptionHandler](src/App.Host/Infrastructure/Errors/GenericExceptionHandler.cs) (logged, generic 500). A new specific handler goes before the generic one, which takes everything. Keep domain-exception mapping in `ApiExceptionFilter`; these handlers are the safety net, and must never write exception messages for 500s.
+
 Rules:
 - A client mistake throws `DomainValidationException`, **not** `ArgumentException`. `ArgumentException` is for guard clauses (programming errors) and becomes a 500. Don't throw `KeyNotFoundException` or `InvalidOperationException` for expected outcomes either; use or add a domain exception.
 - `Core.Service` never references HTTP status codes. The mapping lives only in the filter.
@@ -149,6 +154,7 @@ Rules:
 **Client IP**: `X-Forwarded-For` is trusted only from `ForwardedHeaders:KnownProxies` / `KnownNetworks` (loopback by default). Never trust it more broadly, or clients can spoof their IP to get round rate limits.
 
 **Configuration and options**
+- **Never hard-code credentials**, not even in design-time or test code. The `dotnet ef` factory (`SystemDbContextFactory`) reads `ConnectionStrings__DefaultConnection` too, and its fallback has no credentials.
 - Connection strings (`DefaultConnection`, `Redis`) come from environment variables (`ConnectionStrings__X`) and are read with `GetRequiredConnectionString`, which throws at startup if they are missing. Never commit real secrets.
 - Options classes: `sealed`, a `SectionName` const, `init` properties with **no defaults** (missing config should fail), an `internal bool IsValid()`, registered with `.Bind(...).Validate(...).ValidateOnStart()` inside an `IServiceCollection` extension method (`AddXxx`) in `App.Host/Infrastructure`. Add a case to [StartupValidationTests.cs](tests/Integration.Tests/StartupValidationTests.cs), or to the feature's own configuration tests (e.g. [EcbConfigurationTests](tests/Integration.Tests/Gateways/EcbConfigurationTests.cs)).
 - Don't hard-code tunables such as URLs, timeouts or intervals: add them to an options class and `appsettings.json`. A value needed *while services are registered*, such as the Quartz trigger interval, can't use `ValidateOnStart`. Read and validate it in the `AddXxx` method and throw a message naming the setting, as `AddEcbSyncJob` and `GetRequiredConnectionString` do.
