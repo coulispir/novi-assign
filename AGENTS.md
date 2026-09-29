@@ -92,7 +92,8 @@ Rules:
 - `Core.Service` never references HTTP status codes. The mapping lives only in the filter.
 - Don't return exception messages from 500s, and don't reword or reuse `code` values: clients branch on them.
 - Adding an error: exception class in `Core.Service/Exceptions` -> constant in `ErrorCodes` -> case in `ApiExceptionFilter` -> row in [ErrorResponseTests](tests/Integration.Tests/ErrorHandling/ErrorResponseTests.cs) -> a functional test asserting it with `ShouldBeErrorAsync` -> README "Errors" table.
-- Model binding failures (a missing `[Required]` parameter, bad JSON) are rejected by `[ApiController]` before the action runs, as standard `400` problem details, not `ErrorResponse`.
+- Model binding and validation failures (a missing parameter, an unparsable value, bad JSON, an unknown strategy) also return `ErrorResponse` with `invalid_request`, via `InvalidModelStateResponseFactory` in [AddWalletApi](src/Apis/Wallet.Api/WalletApiServiceCollectionExtensions.cs). **Register controllers only through `AddWalletApi()`** (in `Program.cs` and in every test host), or requests fall back to problem details.
+- Required value-type query parameters use `[BindRequired]`. `[Required]` can't detect a missing value there: it silently binds the default, e.g. the first enum member.
 
 ## Domain invariants (don't break these)
 
@@ -109,7 +110,10 @@ Rules:
 - EF mapping lives in `IEntityTypeConfiguration<T>` classes under `Data/Configurations`, discovered automatically.
 
 **Balance adjustments**
-- Strategies ([Core.Service/Strategies](src/Core.Service/Strategies)) implement `IBalanceStrategy`, are selected by `Name` (case-insensitive) through `BalanceStrategyFactory`, and are registered as **singletons** in `Program.cs`. They must be stateless. Adding one: create the class, register it, and update the "Supported strategies" message in `BalanceStrategyFactory`, `tests/requests.sh` and the README.
+- Strategies ([Core.Service/Strategies](src/Core.Service/Strategies)) implement `IBalanceStrategy` and declare their [BalanceStrategyType](src/Core.Service/Strategies/BalanceStrategyType.cs). `BalanceStrategyFactory` selects them by that enum, and they're registered as **singletons** in `Program.cs`. They must be stateless.
+  - **The enum member names are the public contract** (`?strategy=AddFundsStrategy`, the OpenAPI `enum`, and the idempotency hash, which uses the lower-cased name). Never rename a member, and never use its numeric value for meaning.
+  - The enum binds through `StrictEnumConverter` (names only, case-insensitive; numbers rejected) and serialises as names (`JsonStringEnumConverter`). Keep both attributes.
+  - Adding a strategy: add the enum member, create the class, and register it in `Program.cs`. The factory throws at startup if a member has no strategy or two, and `BalanceStrategyTests` checks that every member has exactly one class. Then update `tests/requests.sh` and the README.
 - `SubtractFundsStrategy` rejects going negative (through `AccountWallet.Debit`, which throws `InsufficientFundsException`); `ForceSubtractFundsStrategy` allows it on purpose (`ForceDebit`).
 - `AccountWallet.RowVersion` is an optimistic concurrency token. Concurrent updates surface as `DbUpdateConcurrencyException`, which becomes `ConcurrencyConflictException` (409). Don't add locks around it. Any other `DbUpdateException` is rethrown and becomes a 500.
 
@@ -127,7 +131,9 @@ Rules:
 
 **Redis keys**: version the key when the format changes (`currency-rates:latest:v1`), always set a TTL, and use `MULTI/EXEC` transactions for multi-step writes. Rate limit keys use hash tags for Redis Cluster; that is why route braces are stripped from the partition key.
 
-**Currency rates**: `EcbSyncJob` runs every minute on **one node** (Quartz clustered SQL Server job store, `[DisallowConcurrentExecution]`). It upserts rates into SQL Server keyed by `(CurrencyCode, RateDate)`, then rebuilds the Redis snapshot from the database on every run, even when nothing changed. Reads go through `CurrencyRatesProvider`: Redis first; on a miss, the database, then `AddIfMissingAsync` (a `WATCH`-guarded fill that never overwrites a fresher snapshot). Don't add an in-process cache (`IMemoryCache`, `HybridCache`): other nodes would serve stale rates. The README explains why.
+**Currency rates**: `EcbSyncJob` runs every minute on **one node** (Quartz clustered SQL Server job store, `[DisallowConcurrentExecution]`). It saves rates with **one raw SQL `MERGE`** ([CurrencyValueRepository.MergeRatesAsync](src/Core.Service/Repositories/CurrencyValueRepository.cs); the assignment requires this). It's keyed on `(CurrencyCode, RateDate)`, so it keeps one row per currency per date (the history). It then rebuilds the Redis snapshot from the database on every run, even when nothing changed. Reads go through `CurrencyRatesProvider`: Redis first; on a miss, the database, then `AddIfMissingAsync` (a `WATCH`-guarded fill that never overwrites a fresher snapshot). Don't add an in-process cache (`IMemoryCache`, `HybridCache`): other nodes would serve stale rates. The README explains why.
+
+**Rate persistence rules**: don't write `CurrencyValues` through tracked EF entities (`Add` / `SaveChanges`); keep all rate writes in the single `MERGE`. Only ever pass values to it as typed `SqlParameter`s, never concatenate them into the SQL. Feed `MergeRatesAsync` validated, de-duplicated rows (one per `(CurrencyCode, RateDate)`), as `EcbRatesService` does. If a column of `CurrencyValues` changes, update the MERGE SQL too; [CurrencyRatesMergeTests](tests/Functional.Tests/CurrencyRatesMergeTests.cs) runs it against real SQL Server.
 
 **Rate limiting**: fixed window per client IP per endpoint (HTTP method + route template), with counters in Redis. IPv6 is grouped by `/64`. Adding a policy:
 1. Add a constant to [RateLimitPolicies.cs](src/Apis/Wallet.Api/RateLimitPolicies.cs) **and list it in `All`**.

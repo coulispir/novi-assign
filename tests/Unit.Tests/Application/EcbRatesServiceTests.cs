@@ -17,74 +17,84 @@ using NSubstitute;
 
 namespace Unit.Tests.Application;
 
+/// <summary>
+/// What the service hands to the MERGE. The SQL itself runs against a real SQL Server in the functional tests.
+/// </summary>
 public sealed class EcbRatesServiceTests
 {
-    private static readonly DateTime RateDate = new(2026, 9, 25, 0, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime RateDate = new(2026, 9, 25, 14, 30, 0, DateTimeKind.Utc);
 
     private readonly IEcbGateway _gateway = Substitute.For<IEcbGateway>();
     private readonly ICurrencyValueRepository _repository = Substitute.For<ICurrencyValueRepository>();
     private readonly EcbRatesService _service;
 
-    private List<CurrencyValue> _added = [];
+    private List<CurrencyValue> _merged = [];
 
     public EcbRatesServiceTests()
     {
         _service = new EcbRatesService(_gateway, _repository, NullLogger<EcbRatesService>.Instance);
 
-        _repository.WhenForAnyArgs(r => r.AddRange(default!)).Do(call => _added = call.Arg<IEnumerable<CurrencyValue>>().ToList());
+        _repository.MergeRatesAsync(default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                _merged = call.Arg<IReadOnlyCollection<CurrencyValue>>().ToList();
+                return new CurrencyRatesMergeResult(Inserted: 1, Updated: 1);
+            });
     }
 
     [Fact]
-    public async Task SyncLatestRatesAsync_WithNewRates_InsertsThemAndSaves()
+    public async Task SyncLatestRatesAsync_MergesTheWholePayloadInOneCall()
     {
         ArrangeFetched(("USD", 1.10m), ("GBP", 0.85m));
-        ArrangeStored();
 
-        var summary = await _service.SyncLatestRatesAsync();
+        await _service.SyncLatestRatesAsync();
 
-        summary.Should().Be(new EcbSyncSummary(Fetched: 2, Inserted: 2, Updated: 0));
-        _added.Select(c => (c.CurrencyCode, c.Rate)).Should().BeEquivalentTo([("USD", 1.10m), ("GBP", 0.85m)]);
-        await _repository.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
+        await _repository.ReceivedWithAnyArgs(1).MergeRatesAsync(default!, default);
+        _merged.Select(c => (c.CurrencyCode, c.Rate)).Should().BeEquivalentTo([("USD", 1.10m), ("GBP", 0.85m)]);
     }
 
     [Fact]
-    public async Task SyncLatestRatesAsync_WithAChangedRateForTheSameDate_UpdatesTheStoredRow()
+    public async Task SyncLatestRatesAsync_ReportsTheFetchedCountAndTheMergeCounts()
     {
-        var stored = CurrencyValue.Create("USD", 1.10m, RateDate);
-        ArrangeFetched(("USD", 1.12m));
-        ArrangeStored(stored);
+        ArrangeFetched(("USD", 1.10m), ("GBP", 0.85m), ("JPY", 171.2m));
 
         var summary = await _service.SyncLatestRatesAsync();
 
-        summary.Should().Be(new EcbSyncSummary(Fetched: 1, Inserted: 0, Updated: 1));
-        stored.Rate.Should().Be(1.12m);
-        _added.Should().BeEmpty();
-        await _repository.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
+        summary.Should().Be(new EcbSyncSummary(Fetched: 3, Inserted: 1, Updated: 1));
     }
 
     [Fact]
-    public async Task SyncLatestRatesAsync_WithUnchangedRates_DoesNotSave()
+    public async Task SyncLatestRatesAsync_NormalizesCurrencyCodesAndRateDates()
     {
-        ArrangeFetched(("USD", 1.10m));
-        ArrangeStored(CurrencyValue.Create("USD", 1.10m, RateDate));
+        ArrangeFetched(("usd", 1.10m));
 
-        var summary = await _service.SyncLatestRatesAsync();
+        await _service.SyncLatestRatesAsync();
 
-        summary.Should().Be(new EcbSyncSummary(Fetched: 1, Inserted: 0, Updated: 0));
-        await _repository.DidNotReceiveWithAnyArgs().SaveChangesAsync(default);
+        var rate = _merged.Should().ContainSingle().Subject;
+        rate.CurrencyCode.Should().Be("USD");
+        rate.RateDate.Should().Be(RateDate.Date);
     }
 
     [Fact]
-    public async Task SyncLatestRatesAsync_WithDuplicateCurrenciesInThePayload_InsertsEachOnce()
+    public async Task SyncLatestRatesAsync_WithDuplicateCurrenciesInThePayload_MergesEachOnceKeepingTheLastRate()
     {
-        // Lower-case duplicates would otherwise hit the (CurrencyCode, RateDate) unique index on save
-        ArrangeFetched(("USD", 1.10m), ("usd", 1.10m));
-        ArrangeStored();
+        // A MERGE fails if its source matches the same row twice
+        ArrangeFetched(("USD", 1.10m), ("usd", 1.12m));
 
-        var summary = await _service.SyncLatestRatesAsync();
+        await _service.SyncLatestRatesAsync();
 
-        summary.Inserted.Should().Be(1);
-        _added.Should().ContainSingle().Which.CurrencyCode.Should().Be("USD");
+        _merged.Should().ContainSingle().Which.Rate.Should().Be(1.12m);
+    }
+
+    [Fact]
+    public async Task SyncLatestRatesAsync_WithAnInvalidRate_ThrowsWithoutWritingAnything()
+    {
+        ArrangeFetched(("USD", 1.10m), ("GBP", 0m));
+
+        var sync = () => _service.SyncLatestRatesAsync();
+
+        await sync.Should().ThrowAsync<ArgumentException>();
+        await _repository.DidNotReceiveWithAnyArgs().MergeRatesAsync(default!, default);
     }
 
     [Fact]
@@ -95,19 +105,12 @@ public sealed class EcbRatesServiceTests
         var summary = await _service.SyncLatestRatesAsync();
 
         summary.Should().Be(new EcbSyncSummary(0, 0, 0));
-        await _repository.DidNotReceiveWithAnyArgs().GetByRateDatesAsync(default!, default);
-        await _repository.DidNotReceiveWithAnyArgs().SaveChangesAsync(default);
+        await _repository.DidNotReceiveWithAnyArgs().MergeRatesAsync(default!, default);
     }
 
     private void ArrangeFetched(params (string Currency, decimal Rate)[] rates)
     {
         _gateway.FetchDailyRatesAsync(Arg.Any<CancellationToken>())
             .Returns(rates.Select(r => new EcbRateResult(r.Currency, r.Rate, RateDate)).ToList());
-    }
-
-    private void ArrangeStored(params CurrencyValue[] stored)
-    {
-        _repository.GetByRateDatesAsync(Arg.Any<IReadOnlyCollection<DateTime>>(), Arg.Any<CancellationToken>())
-            .Returns(stored.ToList());
     }
 }

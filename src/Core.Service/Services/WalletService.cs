@@ -40,9 +40,9 @@ public class WalletService : IWalletService
         return wallet;
     }
 
-    public async ValueTask<WalletAdjustmentResult> AdjustBalanceAsync(long walletId, decimal amount, string currency, string strategyName, string idempotencyKey, CancellationToken cancellationToken)
+    public async ValueTask<WalletAdjustmentResult> AdjustBalanceAsync(long walletId, decimal amount, string currency, BalanceStrategyType strategyType, string idempotencyKey, CancellationToken cancellationToken)
     {
-        var requestHash = ComputeRequestHash(walletId, amount, currency, strategyName);
+        var requestHash = ComputeRequestHash(walletId, amount, currency, strategyType);
 
         var existing = await FindIdempotencyRecordAsync(idempotencyKey, cancellationToken);
         if (existing is not null) return Replay(existing, requestHash);
@@ -50,7 +50,7 @@ public class WalletService : IWalletService
         var wallet = await _walletRepository.GetByIdAsync(walletId, cancellationToken);
         if (wallet is null) throw new WalletNotFoundException(walletId);
 
-        var strategy = _strategyFactory.GetStrategy(strategyName);
+        var strategy = _strategyFactory.GetStrategy(strategyType);
         var walletAmount = await ToWalletCurrencyAsync(amount, currency, wallet, cancellationToken);
         strategy.Apply(wallet, walletAmount);
 
@@ -107,11 +107,13 @@ public class WalletService : IWalletService
         return new WalletAdjustmentResult(record.WalletId, record.Currency, record.Balance, IsReplay: true);
     }
 
-    private static string ComputeRequestHash(long walletId, decimal amount, string currency, string strategyName)
+    private static string ComputeRequestHash(long walletId, decimal amount, string currency, BalanceStrategyType strategyType)
     {
         // Normalize so that e.g. "10" and "10.00", or "eur" and "EUR", count as the same request
         var normalizedAmount = amount.ToString("0.############################", CultureInfo.InvariantCulture);
-        var payload = $"{walletId}|{normalizedAmount}|{currency.ToUpperInvariant()}|{strategyName.ToLowerInvariant()}";
+        // Hash the strategy's name, never its numeric value: the name is the stable public contract, and it keeps the
+        // hash identical to records stored when strategies were plain strings
+        var payload = $"{walletId}|{normalizedAmount}|{currency.ToUpperInvariant()}|{strategyType.ToString().ToLowerInvariant()}";
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload)));
     }
 

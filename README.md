@@ -25,6 +25,7 @@ The document is generated at runtime by ASP.NET Core's built-in `Microsoft.AspNe
 - **OpenAPI 3.0, not the .NET 10 default of 3.1.** Client generators (e.g. openapi-generator for Kotlin) support 3.0 more reliably.
 - **Numbers are documented as plain numbers.** ASP.NET Core's JSON defaults also accept numbers sent as strings, so .NET generates every number as "number or string" (a type list in 3.1, `anyOf` in 3.0). Swagger UI can't fill in such a parameter and rejects every value as missing (`amount: Required field is not provided`), and generated clients would type amounts as strings. A schema transformer keeps only the number type. The API itself still accepts both.
 - **Development only.** Production doesn't publish its API surface, so the [load-balanced setup](#load-balanced-setup), which runs as `Production`, has no `/swagger`.
+- **Strategies are a dropdown.** `strategy` is the [BalanceStrategyType](src/Core.Service/Strategies/BalanceStrategyType.cs) enum, so the document lists its three names as a string `enum`. Swagger UI shows a dropdown, and generated clients get a typed enum. Names bind ignoring case (`addfundsstrategy` works). Anything else is rejected with `400 invalid_request`, including numbers such as `strategy=0`, which ASP.NET would otherwise quietly map to the first strategy.
 - **Every response must be declared.** A status code without a `[ProducesResponseType]` is missing from the contract. [OpenApiDocumentTests](tests/Integration.Tests/OpenApi/OpenApiDocumentTests.cs) checks the endpoints, the `Idempotency-Key` header, every status code of `adjustbalance` and the `ErrorResponse` schema.
 
 ### Load-balanced setup
@@ -70,7 +71,7 @@ Every error the API returns has the same JSON body:
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `invalid_request` | Invalid input: non-positive amount, missing or too long `Idempotency-Key`, bad currency code, negative initial balance, unknown strategy, an amount in another currency that converts to less than 0.0001 of the wallet's currency |
+| 400 | `invalid_request` | Invalid input: a missing or unparsable parameter, malformed JSON, an unknown strategy, non-positive amount, missing or too long `Idempotency-Key`, bad currency code, negative initial balance, an amount in another currency that converts to less than 0.0001 of the wallet's currency |
 | 400 | `unsupported_currency` | No exchange rate is known for the requested conversion or adjustment currency |
 | 404 | `wallet_not_found` | The wallet doesn't exist |
 | 409 | `concurrency_conflict` | Another request changed the wallet at the same time. Retry with the same `Idempotency-Key` |
@@ -85,7 +86,7 @@ Every error the API returns has the same JSON body:
 - **Only expected failures are 4xx.** Anything not in the table, such as a SQL Server outage or a bug, is a `500` with a generic message. Clients aren't told it's their fault, monitoring sees a server error, and internal details (e.g. SQL error text) never reach the response. The exception is logged as `Unhandled exception while processing {Method} {Path}`.
 - **Client errors have their own exception type.** Input the client got wrong throws `DomainValidationException`. `ArgumentException` stays for guard clauses that catch programming errors, and those are `500`s.
 - **Cancelled requests aren't errors.** If the client disconnects, the filter doesn't log an error or write a response.
-- **Malformed requests are rejected before the action runs.** A missing required query parameter or an unparseable body is rejected by ASP.NET Core's `[ApiController]` model validation. That response is a standard `400` [problem details](https://www.rfc-editor.org/rfc/rfc9457) body, not the shape above.
+- **Malformed requests use the same body.** ASP.NET Core rejects a missing required parameter, an unparsable value or malformed JSON before the action runs. `AddWalletApi` ([WalletApiServiceCollectionExtensions.cs](src/Apis/Wallet.Api/WalletApiServiceCollectionExtensions.cs)) replaces the default problem details with the same `ErrorResponse` (`invalid_request`), prefixing each message with the parameter name (e.g. `strategy: The value 'Transfer' is not valid.`). Clients handle one error shape.
 
 To add an error: create an exception in `Core.Service/Exceptions`, throw it from the domain code, add a code to [ErrorCodes](src/Apis/Wallet.Api/Models/ErrorResponse.cs), map it in `ApiExceptionFilter`, add a case to [ErrorResponseTests](tests/Integration.Tests/ErrorHandling/ErrorResponseTests.cs), and cover it end to end in [Functional.Tests](tests/Functional.Tests).
 
@@ -152,6 +153,30 @@ The real client IP is read from `X-Forwarded-For`, **but only when the request c
 ### Redis
 
 The Redis connection string is `ConnectionStrings:Redis`, set to `redis:6379` in Docker Compose. One shared `IConnectionMultiplexer` is registered in [RedisServiceCollectionExtensions.cs](src/App.Host/Infrastructure/RedisServiceCollectionExtensions.cs). Rate limiting and the [currency rates cache](#currency-rates-cache) both use it, and any new Redis feature should too, rather than open a second connection.
+
+## ECB rate sync
+
+[EcbSyncJob](src/Core.Service/Jobs/EcbSyncJob.cs) runs every minute (Quartz, on one node per trigger). It fetches the daily ECB feed through the [Ecb.Gateway](src/Ecb.Gateway/Services/EcbGateway.cs) library, saves the rates to SQL Server, then refreshes the [currency rates cache](#currency-rates-cache).
+
+```
+ECB feed ──► EcbGateway (typed EcbRateResult) ──► EcbRatesService (validate, de-duplicate) ──► one MERGE ──► CurrencyValues
+```
+
+`CurrencyValues` keeps **one row per currency per date**, so it holds the full history of rates. A new day adds rows; the same day again updates them.
+
+### How it works
+
+- **One raw SQL `MERGE` per sync.** [CurrencyValueRepository.MergeRatesAsync](src/Core.Service/Repositories/CurrencyValueRepository.cs) sends the whole feed in a single `MERGE INTO CurrencyValues` statement, matching on the unique `(CurrencyCode, RateDate)` index:
+  - a date with no row for that currency is **inserted**;
+  - a row whose rate changed is **updated** (rate and `UpdatedAt`);
+  - an unchanged rate matches no `WHEN` clause, so the row isn't rewritten.
+
+  One statement means one round trip and one transaction: all rates are saved, or none are. `OUTPUT $action` returns what happened to each row, which feeds the `Inserted` / `Updated` counts in the job's log line.
+- **Parameters only.** The SQL text contains nothing but generated parameter names (`@c0, @r0, @d0, @u0, ...`). Every value is sent as a typed parameter matching its column (`char(3)`, `decimal(18,6)`, `date`, `datetime2`), so feed data can never change the statement and no precision is lost.
+- **`WITH (HOLDLOCK)`** keeps the matched key range locked until the insert. Two merges running at the same time (e.g. a manual run during a scheduled one) can't both insert the same currency and date and fail on the unique index.
+- **The feed is cleaned first.** `EcbRatesService` validates every rate through `CurrencyValue.Create` (a 3-letter code, a positive rate, the date only) and keeps one entry per currency and date. A `MERGE` fails if its source matches the same row twice. An invalid rate fails the whole sync before anything is written, and the job retries on its next run.
+- **Limit:** SQL Server allows 2100 parameters per statement and each rate uses 4, so one merge takes at most 500 rates (`MaxRatesPerMerge`). The daily feed has about 30.
+- **Safe to retry.** Running the same merge again changes nothing, so EF's retry on transient SQL errors can safely repeat it.
 
 ## Adjustments in another currency
 
@@ -232,7 +257,7 @@ The tests follow the layers of the code, and each layer is tested with the light
 
 - **Domain:** wallet creation and credit/debit/force-debit rules, currency rate validation, each balance strategy, and strategy lookup, including which domain exception each rule throws (see [Errors](#errors)).
 - **Application:**
-  - the ECB upsert (insert, update, skip unchanged, de-duplicate, empty feed);
+  - what the ECB sync hands to the merge (the whole feed in one call, normalised, de-duplicated, invalid rates rejected, empty feed skipped);
   - conversion maths through EUR, including rounding, in `CurrencyConverter`;
   - handler input validation;
   - cache-aside reads;
@@ -252,6 +277,7 @@ The tests follow the layers of the code, and each layer is tested with the light
 These boot the real `Program.cs` (DI, middleware, migrations) against real SQL Server and Redis containers:
 
 - **Wallet lifecycle:** create, read, each strategy, and every error path (400, 404, and 422 for insufficient funds), each checked against its [error code](#errors). Failed requests leave the balance unchanged.
+- **ECB rate merge:** the raw SQL `MERGE` against SQL Server. It inserts missing dates, updates only changed rates (unchanged rows keep their `UpdatedAt`), keeps the history per date, does nothing on a repeat, stores the full `decimal(18,6)` precision, and rejects more rates than one statement can carry.
 - **Idempotency and concurrency:** replays, key reuse with a different request (422), parallel retries with the same key applied exactly once, and parallel adjustments never losing an update.
 - **Currency conversion:** the full path from ECB feed to sync job, SQL Server, Redis and the endpoint. Also: rates are served from Redis rather than SQL Server, an empty cache falls back to the database and refills, new rates are served after a sync, and a currency the ECB drops keeps its last rate. Adjustments in another currency: credits and debits at the synced rate (including between two non-EUR currencies), the overdraft rule checked on the converted amount, and unknown currencies or amounts too small to convert rejected without changing the balance.
 

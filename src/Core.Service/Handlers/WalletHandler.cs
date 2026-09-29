@@ -5,11 +5,12 @@ using System.Threading.Tasks;
 using Core.Service.Entities;
 using Core.Service.Exceptions;
 using Core.Service.Services;
+using Core.Service.Strategies;
 
 namespace Core.Service.Handlers;
 
 public record CreateWalletCommand(string Currency, decimal InitialBalance);
-public record AdjustBalanceCommand(long WalletId, decimal Amount, string Currency, string Strategy, string IdempotencyKey);
+public record AdjustBalanceCommand(long WalletId, decimal Amount, string Currency, BalanceStrategyType Strategy, string IdempotencyKey);
 public record GetBalanceQuery(long WalletId, string? TargetCurrency);
 public record BalanceDisplayResult(long WalletId, decimal OriginalBalance, string OriginalCurrency, decimal RequestedBalance, string RequestedCurrency);
 

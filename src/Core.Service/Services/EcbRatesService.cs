@@ -36,40 +36,17 @@ public class EcbRatesService : IEcbRatesService
             return new EcbSyncSummary(0, 0, 0);
         }
 
-        // Load existing rows for the same rate dates so we can upsert against the (CurrencyCode, RateDate) key
-        var rateDates = fetchedRates.Select(r => r.RateDate.Date).Distinct().ToList();
-        var existingRates = await _currencyValueRepository.GetByRateDatesAsync(rateDates, cancellationToken);
-        var existingByKey = existingRates.ToDictionary(c => (c.CurrencyCode, c.RateDate.Date));
+        // Create validates and normalises each rate (upper-case code, date only). One row per (CurrencyCode, RateDate):
+        // a MERGE fails if its source matches the same target row twice, so a duplicate in the payload keeps the last rate.
+        var rates = fetchedRates
+            .Select(rate => CurrencyValue.Create(rate.CurrencyCode, rate.Rate, rate.RateDate))
+            .GroupBy(rate => (rate.CurrencyCode, rate.RateDate))
+            .Select(group => group.Last())
+            .ToList();
 
-        var newRates = new List<CurrencyValue>();
-        var updated = 0;
+        // One MERGE statement for the whole payload: updates changed rates and inserts missing dates in a single transaction
+        var merged = await _currencyValueRepository.MergeRatesAsync(rates, cancellationToken);
 
-        foreach (var rate in fetchedRates)
-        {
-            var key = (rate.CurrencyCode.ToUpperInvariant(), rate.RateDate.Date);
-
-            if (existingByKey.TryGetValue(key, out var existing))
-            {
-                if (existing.Rate != rate.Rate)
-                {
-                    existing.UpdateRate(rate.Rate, rate.RateDate);
-                    updated++;
-                }
-
-                continue;
-            }
-
-            var currencyValue = CurrencyValue.Create(rate.CurrencyCode, rate.Rate, rate.RateDate);
-            existingByKey[key] = currencyValue; // Guards against duplicate entries within the same payload
-            newRates.Add(currencyValue);
-        }
-
-        if (newRates.Count > 0 || updated > 0)
-        {
-            _currencyValueRepository.AddRange(newRates);
-            await _currencyValueRepository.SaveChangesAsync(cancellationToken);
-        }
-
-        return new EcbSyncSummary(fetchedRates.Count, newRates.Count, updated);
+        return new EcbSyncSummary(fetchedRates.Count, merged.Inserted, merged.Updated);
     }
 }

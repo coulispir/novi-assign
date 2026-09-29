@@ -85,7 +85,7 @@ internal sealed class RateLimitedApp : IAsyncDisposable
         builder.Services.AddTrustedForwardedHeaders(builder.Configuration);
         builder.Services.AddClientIpRateLimiting(builder.Configuration, RateLimitPolicies.All);
         builder.Services.AddSingleton(CreateWalletHandler());
-        builder.Services.AddControllers().AddApplicationPart(typeof(AssemblyReference).Assembly);
+        builder.Services.AddWalletApi();
 
         var app = builder.Build();
 
