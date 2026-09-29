@@ -48,10 +48,10 @@ public class WalletService : IWalletService
         if (existing is not null) return Replay(existing, requestHash);
 
         var wallet = await _walletRepository.GetByIdAsync(walletId, cancellationToken);
-        if (wallet is null) throw new KeyNotFoundException($"Wallet ID '{walletId}' not found.");
+        if (wallet is null) throw new WalletNotFoundException(walletId);
 
         if (!string.Equals(wallet.Currency, currency, StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException($"Currency mismatch. Transaction must match wallet base currency: {wallet.Currency}.");
+            throw new DomainValidationException($"Currency mismatch. Transaction must match wallet base currency: {wallet.Currency}.");
 
         var strategy = _strategyFactory.GetStrategy(strategyName);
         strategy.Apply(wallet, amount);
@@ -105,7 +105,7 @@ public class WalletService : IWalletService
     public async ValueTask<(AccountWallet Wallet, decimal CalculatedBalance, string TargetCurrency)> GetConvertedBalanceAsync(long walletId, string? targetCurrency, CancellationToken cancellationToken)
     {
         var wallet = await _walletRepository.GetByIdAsync(walletId, cancellationToken);
-        if (wallet is null) throw new KeyNotFoundException($"Wallet ID '{walletId}' not found.");
+        if (wallet is null) throw new WalletNotFoundException(walletId);
 
         if (string.IsNullOrWhiteSpace(targetCurrency) || string.Equals(wallet.Currency, targetCurrency, StringComparison.OrdinalIgnoreCase))
         {
@@ -120,7 +120,7 @@ public class WalletService : IWalletService
         var targetCurrencyRate = GetEuroRate(rates, upperTarget);
 
         if (walletCurrencyRate is null || targetCurrencyRate is null || walletCurrencyRate == 0)
-            throw new InvalidOperationException($"Exchange metrics unavailable for converting {wallet.Currency} to {upperTarget}.");
+            throw new UnsupportedCurrencyException($"No exchange rate is available for converting {wallet.Currency} to {upperTarget}.");
 
         decimal outputBalance = (wallet.Balance / walletCurrencyRate.Value) * targetCurrencyRate.Value;
         return (wallet, Math.Round(outputBalance, 4), upperTarget);

@@ -70,7 +70,7 @@ public sealed class IdempotencyAndConcurrencyTests
         using var first = await _api.AdjustAsync(wallet.Id, 25m, "EUR", "AddFundsStrategy", key);
         using var reused = await _api.AdjustAsync(wallet.Id, 30m, "EUR", "AddFundsStrategy", key);
 
-        reused.StatusCode.Should().Be(HttpStatusCode.UnprocessableEntity);
+        await reused.ShouldBeErrorAsync(HttpStatusCode.UnprocessableEntity, "idempotency_key_reused");
         (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(125m);
     }
 

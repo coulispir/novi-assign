@@ -38,7 +38,8 @@ public sealed class RateLimitingTests
 
         rejected.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
         rejected.Headers.RetryAfter!.Delta.Should().BeGreaterThan(TimeSpan.Zero).And.BeLessThanOrEqualTo(TimeSpan.FromMinutes(1));
-        (await rejected.Content.ReadAsStringAsync()).Should().Contain("Too many requests");
+        var body = await rejected.Content.ReadAsStringAsync();
+        body.Should().Contain("Too many requests").And.Contain("\"code\":\"rate_limited\"");
     }
 
     public static TheoryData<string, int> EndpointLimits => new()

@@ -12,7 +12,7 @@ It is built to run as **several replicas behind a load balancer**. Every design 
 
 ```bash
 dotnet build                      # must finish with 0 warnings: warnings are errors
-dotnet test                       # unit + integration tests; Docker must be running (Testcontainers Redis)
+dotnet test                       # all tests; Docker must be running (Testcontainers Redis and SQL Server)
 dotnet test tests/Unit.Tests      # unit tests only, no Docker needed
 
 cp .env.sample .env && docker compose up -d                                  # dev stack, hot reload, http://localhost:5000
@@ -36,8 +36,9 @@ src/
                      EF DbContext + migrations, Quartz jobs, interfaces for everything external
   Ecb.Gateway/       HttpClient implementation of IEcbGateway (ECB daily XML feed)
 tests/
-  Unit.Tests/        References Core.Service only; NSubstitute mocks
+  Unit.Tests/        Domain/ (entities, strategies; no mocks) and Application/ (handler, services, job; NSubstitute)
   Integration.Tests/ References App.Host; real Redis via Testcontainers, in-memory TestServer
+  Functional.Tests/  The real Program.cs end to end via WebApplicationFactory; SQL Server + Redis containers
 ```
 
 Dependencies point inward, towards `Core.Service`:
@@ -64,7 +65,27 @@ Middleware order in `Program.cs` matters: `UseForwardedHeaders` (first, so the r
 | `GET /api/wallets/{walletId}?currency=USD` | `wallet-read` | `currency` optional; converts via EUR |
 | `POST /api/wallets/{walletId}/adjustbalance?amount=&currency=&strategy=` + `Idempotency-Key` header | `wallet-adjust` | `Idempotent-Replayed: true` on replay |
 
-Error mapping in [WalletController.cs](src/Apis/Wallet.Api/Controllers/WalletController.cs): `KeyNotFoundException` -> 404, `ConcurrencyConflictException` -> 409, `IdempotencyKeyReuseException` -> 422, **any other exception -> 400** with `{ "error": message }`. Rate limited -> 429 with `Retry-After`. Note that `InsufficientFundsException` and validation `ArgumentException`s currently fall into the generic 400.
+## Errors
+
+Every error body is `{ "error": "<message>", "code": "<stable code>" }` ([ErrorResponse.cs](src/Apis/Wallet.Api/Models/ErrorResponse.cs)). Controller actions have **no try/catch**: [ApiExceptionFilter](src/Apis/Wallet.Api/Filters/ApiExceptionFilter.cs), applied to `WalletController`, maps domain exceptions from [Core.Service/Exceptions](src/Core.Service/Exceptions):
+
+| Exception | Status | `code` |
+|---|---|---|
+| `DomainValidationException` | 400 | `invalid_request` |
+| `UnsupportedCurrencyException` | 400 | `unsupported_currency` |
+| `WalletNotFoundException` | 404 | `wallet_not_found` |
+| `ConcurrencyConflictException` | 409 | `concurrency_conflict` |
+| `InsufficientFundsException` | 422 | `insufficient_funds` |
+| `IdempotencyKeyReuseException` | 422 | `idempotency_key_reused` |
+| rate limited (middleware, not the filter) | 429 | `rate_limited` |
+| **anything else** | 500 | `internal_error`, generic message, exception logged |
+
+Rules:
+- A client mistake throws `DomainValidationException`, **not** `ArgumentException`. `ArgumentException` is for guard clauses (programming errors) and becomes a 500. Don't throw `KeyNotFoundException` or `InvalidOperationException` for expected outcomes either; use or add a domain exception.
+- `Core.Service` never references HTTP status codes. The mapping lives only in the filter.
+- Don't return exception messages from 500s, and don't reword or reuse `code` values: clients branch on them.
+- Adding an error: exception class in `Core.Service/Exceptions` -> constant in `ErrorCodes` -> case in `ApiExceptionFilter` -> row in [ErrorResponseTests](tests/Integration.Tests/ErrorHandling/ErrorResponseTests.cs) -> a functional test asserting it with `ShouldBeErrorAsync` -> README "Errors" table.
+- Model binding failures (a missing `[Required]` parameter, bad JSON) are rejected by `[ApiController]` before the action runs, as standard `400` problem details, not `ErrorResponse`.
 
 ## Domain invariants (don't break these)
 
@@ -80,8 +101,8 @@ Error mapping in [WalletController.cs](src/Apis/Wallet.Api/Controllers/WalletCon
 
 **Balance adjustments**
 - Strategies ([Core.Service/Strategies](src/Core.Service/Strategies)) implement `IBalanceStrategy`, are selected by `Name` (case-insensitive) through `BalanceStrategyFactory`, and are registered as **singletons** in `Program.cs`. They must be stateless. Adding one: create the class, register it, and update the "Supported strategies" message in `BalanceStrategyFactory`, `tests/requests.sh` and the README.
-- `SubtractFundsStrategy` rejects going negative; `ForceSubtractFundsStrategy` allows it on purpose.
-- `AccountWallet.RowVersion` is an optimistic concurrency token. Concurrent updates surface as `DbUpdateConcurrencyException`, which becomes `ConcurrencyConflictException` (409). Don't add locks around it.
+- `SubtractFundsStrategy` rejects going negative (through `AccountWallet.Debit`, which throws `InsufficientFundsException`); `ForceSubtractFundsStrategy` allows it on purpose (`ForceDebit`).
+- `AccountWallet.RowVersion` is an optimistic concurrency token. Concurrent updates surface as `DbUpdateConcurrencyException`, which becomes `ConcurrencyConflictException` (409). Don't add locks around it. Any other `DbUpdateException` is rethrown and becomes a 500.
 
 **Idempotency** ([WalletService.AdjustBalanceAsync](src/Core.Service/Services/WalletService.cs))
 - `Idempotency-Key` is required, max 100 characters (`IdempotencyRecord.MaxKeyLength`).
@@ -128,10 +149,13 @@ Error mapping in [WalletController.cs](src/Apis/Wallet.Api/Controllers/WalletCon
 
 ## Testing
 
-- **Unit tests** (`tests/Unit.Tests`): xUnit + NSubstitute + FluentAssertions, for `Core.Service` logic. Mock interfaces, not `DbContext`.
-- **Integration tests** (`tests/Integration.Tests`): join `[Collection(RedisCollection.Name)]` to share the Testcontainers Redis ([RedisFixture.cs](tests/Integration.Tests/RedisFixture.cs)). Tests in that collection run one at a time, so isolate state: rate limit tests take a fresh IP from `RateLimitedApp.NextClientIp()`, and cache tests reset their key first.
-- Integration tests register the **production** extension methods (`AddRedis`, `AddClientIpRateLimiting`, ...) instead of rebuilding them, so the production code path is what gets tested. There is no SQL Server in tests; the wallet handler is substituted.
-- New behaviour needs tests at the matching level, including the Redis-down (fail-open) path for anything that touches Redis.
+Test each layer with the lightest setup that can still catch its bugs. The README's "Tests" section has the full breakdown.
+
+- **Unit tests** (`tests/Unit.Tests`): xUnit + NSubstitute + FluentAssertions. `Domain/` tests entities and strategies with no mocks; `Application/` tests the handler, services and job with ports mocked. Assert the exact domain exception type each rule throws. Mock interfaces, not `DbContext`. Names follow `Method_Scenario_Result`.
+- **Integration tests** (`tests/Integration.Tests`): infrastructure adapters. Redis tests join `[Collection(RedisCollection.Name)]` to share the Testcontainers Redis ([RedisFixture.cs](tests/Integration.Tests/RedisFixture.cs)). Tests in that collection run one at a time, so isolate state: rate limit tests take a fresh IP from `RateLimitedApp.NextClientIp()`, and cache tests reset their key first. They register the **production** extension methods (`AddRedis`, `AddClientIpRateLimiting`, ...) rather than rebuilding them, and substitute the wallet handler, so there is no SQL Server here.
+- **Error handling tests** ([ErrorResponseTests](tests/Integration.Tests/ErrorHandling/ErrorResponseTests.cs)): the real controller on a TestServer with a throwing handler substitute. No Redis needed.
+- **Functional tests** (`tests/Functional.Tests`): the real `Program.cs` against SQL Server and Redis containers, through [WalletApiFactory](tests/Functional.Tests/Infrastructure/WalletApiFactory.cs); only the ECB feed is faked ([FakeEcbFeed](tests/Functional.Tests/Infrastructure/FakeEcbFeed.cs)). The Quartz scheduler doesn't run: call `EcbSyncJob` explicitly when a test needs a sync. Every test creates its own wallets and never relies on another test's data. The tests keep **their own copies of the response contracts** (`WalletDto`, `ErrorDto`, ...) on purpose, so don't replace them with the API's types. Assert errors with `response.ShouldBeErrorAsync(status, "code")`.
+- New behaviour needs tests at the matching level, including the Redis-down (fail-open) path for anything that touches Redis, and a functional test for anything that depends on SQL Server behaviour (row versions, unique keys).
 
 ## Documentation
 

@@ -1,5 +1,4 @@
 using Core.Service.Entities;
-using Core.Service.Exceptions;
 
 namespace Core.Service.Strategies;
 
@@ -9,11 +8,7 @@ public class SubtractFundsStrategy : IBalanceStrategy
 
     public void Apply(AccountWallet wallet, decimal amount)
     {
-        // Check balance bounds manually first to throw your dedicated domain exception shape
-        if (wallet.Balance - amount < 0)
-        {
-            throw new InsufficientFundsException("Wallet lacks sufficient funds to complete this operation.");
-        }
+        // Debit rejects going below zero with InsufficientFundsException
         wallet.Debit(amount);
     }
 }
