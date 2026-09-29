@@ -20,7 +20,7 @@ Every task of the NoviCode assignment, where it's implemented and where it's tes
 | **Tech stack**: .NET 5+, Entity Framework, Options pattern, Quartz, xUnit | .NET 10, EF Core + SQL Server, validated options (e.g. [AddEcbGateway](src/App.Host/Infrastructure/Ecb/EcbServiceCollectionExtensions.cs)), Quartz, xUnit + NSubstitute + FluentAssertions | `EcbConfigurationTests`, `StartupValidationTests` |
 | **Patterns**: interfaces + implementations, Decorator, Factory | Ports in `Core.Service/Interfaces`; Decorators [LoggingEcbGatewayDecorator](src/Core.Service/Decorators/LoggingEcbGatewayDecorator.cs) and [FailOpenRateLimiter](src/App.Host/Infrastructure/RateLimiting/FailOpenRateLimiter.cs); Factory `BalanceStrategyFactory`; Strategy; Adapter | [LoggingEcbGatewayDecoratorTests](tests/Unit.Tests/Application/LoggingEcbGatewayDecoratorTests.cs), `BalanceStrategyTests` |
 
-Beyond the brief: optional [idempotent adjustments](#idempotent-adjustments-optional), optimistic concurrency, a single [error contract](#errors), [OpenAPI + Swagger UI](#api-documentation), a [load-balanced setup](#load-balanced-setup), about 200 tests across unit, integration and functional suites, and [CI](#ci).
+Beyond the brief: [health checks](#health-checks), optional [idempotent adjustments](#idempotent-adjustments-optional), optimistic concurrency, a single [error contract](#errors), [OpenAPI + Swagger UI](#api-documentation), a [load-balanced setup](#load-balanced-setup), about 200 tests across unit, integration and functional suites, and [CI](#ci).
 
 ## Architecture
 
@@ -99,6 +99,25 @@ Things to know:
 - **All local requests look like one client.** Docker Desktop hands nginx connections from its gateway (e.g. `172.28.0.1`), not your machine's real IP. That's enough to show the limit holding across replicas; the integration tests cover different clients and faked headers.
 - **The image doesn't hot reload.** It's built once, so rebuild with `--build` after code changes.
 - **Switch back to the hot-reload setup** with `docker compose up -d --remove-orphans`.
+
+## Health checks
+
+| Endpoint | Checks | Use it for |
+|---|---|---|
+| `GET /health` | SQL Server (`SELECT 1`) and Redis (`PING`) | The load balancer and readiness probes: should this replica get traffic? |
+| `GET /health/live` | Nothing beyond the process answering | Liveness probes: should this replica be restarted? |
+
+```json
+{ "status": "Healthy", "totalDurationMs": 9, "checks": { "sql-server": { "status": "Healthy", "durationMs": 5 }, "redis": { "status": "Healthy", "durationMs": 7 } } }
+```
+
+- **SQL Server down: `Unhealthy`, `503`.** The app can't serve wallets without it, so the load balancer should stop sending traffic.
+- **Redis down: `Degraded`, still `200`.** Rate limiting and the rates cache [fail open](#rate-limiting), so the app keeps working. Reporting Unhealthy would make the load balancer pull every replica at once over a dependency the app can do without. The status still shows the outage.
+- **Liveness never checks dependencies,** so a database outage doesn't make an orchestrator restart healthy processes in a loop.
+- **Each check has a timeout** (`HealthChecks:Timeout`, 5 seconds by default; keep it below the probe's timeout). The SQL check opens its own connection rather than going through EF Core, whose retry strategy would hold a probe for seconds during an outage.
+- **Safe to expose.** The response contains only statuses and durations, never error messages or connection details; failures are logged instead. Responses are never cached, and successful probes are kept out of the request log so it isn't flooded.
+
+Code: [DependencyHealthCheckExtensions](src/App.Host/Infrastructure/HealthChecks/DependencyHealthCheckExtensions.cs). Tests: `DependencyHealthCheckTests` (outages, against real Redis) and the functional `HealthCheckTests` (the real app).
 
 ## Errors
 
@@ -391,7 +410,7 @@ What a production version would add, roughly in priority order:
 
 1. **A transaction ledger.** Adjustments change the wallet's balance directly; there's no history of credits and debits. A real wallet would record every adjustment in an append-only ledger (amount, currency, rate used, strategy, idempotency key), with the balance derived from it or reconciled against it. That enables audits, statements and dispute handling.
 2. **Authentication and authorisation.** Any client can read or adjust any wallet. Next: authenticate callers, check wallet ownership, and key rate limits on the user or API key instead of the IP.
-3. **Health checks and observability.** Add `/health` covering SQL Server and Redis for the load balancer, plus metrics (request rates, `429`s, cache hit ratio, sync duration and failures) and distributed tracing.
+3. **Observability.** Health checks exist ([`/health`](#health-checks)); next are metrics (request rates, `429`s, cache hit ratio, sync duration and failures) and distributed tracing, e.g. with OpenTelemetry.
 4. **Deployment.** Run migrations as a separate deployment step rather than at startup, publish the Docker image from CI, and use a secret store and a least-privilege SQL login. See [Production considerations](#production-considerations).
 5. **Rates when none are synced yet.** Right after the very first start, before the first sync, conversions return `400 unsupported_currency`. `503` with `Retry-After` would describe that better.
 
@@ -424,7 +443,7 @@ The code is built to run as several replicas behind a load balancer, as the [loa
 - **Deploy the image, not the source.** The [Dockerfile](Dockerfile) already builds a production image; publish it from CI with a versioned tag instead of building on the host.
 - **Keep secrets out of the repo.** Inject connection strings from a secret store (e.g. Key Vault, AWS Secrets Manager, Kubernetes secrets) rather than `.env`, and use a least-privilege SQL login instead of `sa`.
 - **Run migrations as a separate deployment step** rather than at app startup. The app's SQL login then needs no permission to change the schema, and a failed migration stops the deployment instead of crash-looping every replica.
-- **Add health checks** (`/health` covering SQL Server and Redis) for the load balancer and orchestrator.
+- **Point the load balancer and orchestrator at the [health checks](#health-checks):** `/health` for readiness and routing, `/health/live` for liveness. Restrict who can reach them if the API is public.
 
 ### Currency rates cache
 

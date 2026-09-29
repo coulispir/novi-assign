@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using App.Host.Infrastructure;
 using App.Host.Infrastructure.Caching;
 using App.Host.Infrastructure.Ecb;
+using App.Host.Infrastructure.HealthChecks;
 using App.Host.Infrastructure.Jobs;
 using App.Host.Infrastructure.RateLimiting;
 
@@ -71,6 +72,9 @@ builder.Services.AddEcbSyncJob(builder.Configuration, connectionString);
 
 // Shared Redis connection, the currency rates cache and rate limiting backed by it, and real client IP resolution behind load balancers
 builder.Services.AddRedis(builder.Configuration);
+
+// /health (SQL Server + Redis) for the load balancer and readiness probes, /health/live for liveness probes
+builder.Services.AddDependencyHealthChecks(builder.Configuration, connectionString);
 builder.Services.AddCurrencyRatesCache(builder.Configuration);
 builder.Services.AddTrustedForwardedHeaders(builder.Configuration);
 builder.Services.AddClientIpRateLimiting(builder.Configuration, Wallet.Api.RateLimitPolicies.All);
@@ -95,12 +99,16 @@ if (app.Environment.IsDevelopment())
 
 // Must run first so logging and rate limiting see the real client IP rather than the load balancer's
 app.UseForwardedHeaders();
-app.UseSerilogRequestLogging();
+app.UseSerilogRequestLogging(options => options.GetLevel = (httpContext, _, exception) =>
+    exception is null && httpContext.Response.StatusCode < 500 && DependencyHealthCheckExtensions.IsHealthCheckRequest(httpContext)
+        ? Serilog.Events.LogEventLevel.Verbose
+        : Serilog.Events.LogEventLevel.Information);
 app.UseRouting();
 
 // After routing, so endpoint-specific policies ([EnableRateLimiting]) are resolved
 app.UseRateLimiter();
 app.MapControllers();
+app.MapDependencyHealthChecks();
 
 if (app.Environment.IsDevelopment())
 {
