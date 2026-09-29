@@ -64,7 +64,7 @@ Middleware order in `Program.cs` matters: `UseForwardedHeaders` (first, so the r
 |---|---|---|
 | `POST /api/wallets` body `{ "currency": "EUR", "initialBalance": 100 }` | `wallet-create` | 201 |
 | `GET /api/wallets/{walletId}?currency=USD` | `wallet-read` | `currency` optional; converts via EUR |
-| `POST /api/wallets/{walletId}/adjustbalance?amount=&currency=&strategy=` + `Idempotency-Key` header | `wallet-adjust` | `currency` may differ from the wallet's: converted first. `Idempotent-Replayed: true` on replay |
+| `POST /api/wallets/{walletId}/adjustbalance?amount=&currency=&strategy=` (+ optional `Idempotency-Key` header) | `wallet-adjust` | `currency` may differ from the wallet's: converted first. `Idempotent-Replayed: true` on replay |
 
 **The OpenAPI contract** is generated from the controllers by the built-in `Microsoft.AspNetCore.OpenApi` and browsable with Swagger UI, **in Development only**: `/swagger` and `/openapi/v1.json` (set up in [ApiDocumentationExtensions.cs](src/App.Host/Infrastructure/ApiDocumentationExtensions.cs)). Nothing is hand-written, so keep the controllers descriptive:
 - Declare **every** status an action can return with `[ProducesResponseType]`, errors with `Type = typeof(ErrorResponse)`. An undeclared status is missing from the contract clients generate code from.
@@ -119,7 +119,7 @@ Rules:
 - `AccountWallet.RowVersion` is an optimistic concurrency token. Concurrent updates surface as `DbUpdateConcurrencyException`, which becomes `ConcurrencyConflictException` (409). Don't add locks around it. Any other `DbUpdateException` is rethrown and becomes a 500.
 
 **Idempotency** ([WalletService.AdjustBalanceAsync](src/Core.Service/Services/WalletService.cs))
-- `Idempotency-Key` is required, max 100 characters (`IdempotencyRecord.MaxKeyLength`).
+- `Idempotency-Key` is **optional**: the endpoint must keep working exactly as the assignment's URL, with no header. A missing or empty key → no idempotency (`AdjustWithoutIdempotencyAsync`: no lookup, hash or record; each request applies). A key that is sent must be 1-100 characters (`IdempotencyRecord.MaxKeyLength`) and not blank, or it's a `DomainValidationException` (400). Never make the header required again.
 - The `IdempotencyRecord` is saved in **the same `SaveChanges`** as the balance change, so both commit or neither does. Keep that when changing this code.
 - The request hash is SHA-256 over normalised `walletId|amount|CURRENCY|strategy`. The same key with the same request replays the stored result; the same key with a different request -> 422.
 - On `DbUpdateException` the change tracker is cleared and the key is looked up again, because a parallel request may have won.

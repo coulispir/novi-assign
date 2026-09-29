@@ -40,19 +40,17 @@ public class WalletService : IWalletService
         return wallet;
     }
 
-    public async ValueTask<WalletAdjustmentResult> AdjustBalanceAsync(long walletId, decimal amount, string currency, BalanceStrategyType strategyType, string idempotencyKey, CancellationToken cancellationToken)
+    public async ValueTask<WalletAdjustmentResult> AdjustBalanceAsync(long walletId, decimal amount, string currency, BalanceStrategyType strategyType, string? idempotencyKey, CancellationToken cancellationToken)
     {
+        if (idempotencyKey is null)
+            return await AdjustWithoutIdempotencyAsync(walletId, amount, currency, strategyType, cancellationToken);
+
         var requestHash = ComputeRequestHash(walletId, amount, currency, strategyType);
 
         var existing = await FindIdempotencyRecordAsync(idempotencyKey, cancellationToken);
         if (existing is not null) return Replay(existing, requestHash);
 
-        var wallet = await _walletRepository.GetByIdAsync(walletId, cancellationToken);
-        if (wallet is null) throw new WalletNotFoundException(walletId);
-
-        var strategy = _strategyFactory.GetStrategy(strategyType);
-        var walletAmount = await ToWalletCurrencyAsync(amount, currency, wallet, cancellationToken);
-        strategy.Apply(wallet, walletAmount);
+        var wallet = await ApplyAsync(walletId, amount, currency, strategyType, cancellationToken);
 
         // Saved in the same SaveChanges as the balance update, so both commit or neither does
         _dbContext.IdempotencyRecords.Add(IdempotencyRecord.Create(idempotencyKey, requestHash, wallet));
@@ -77,6 +75,36 @@ public class WalletService : IWalletService
         }
 
         return new WalletAdjustmentResult(wallet.Id, wallet.Currency, wallet.Balance, IsReplay: false);
+    }
+
+    // Without a key there is nothing to replay: apply the adjustment once, as any plain POST would
+    private async ValueTask<WalletAdjustmentResult> AdjustWithoutIdempotencyAsync(long walletId, decimal amount, string currency, BalanceStrategyType strategyType, CancellationToken cancellationToken)
+    {
+        var wallet = await ApplyAsync(walletId, amount, currency, strategyType, cancellationToken);
+
+        try
+        {
+            await _walletRepository.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // Another request changed the wallet first and nothing was committed, so retrying is safe
+            throw new ConcurrencyConflictException($"Wallet ID '{walletId}' was modified by another request. Retry the request.");
+        }
+
+        return new WalletAdjustmentResult(wallet.Id, wallet.Currency, wallet.Balance, IsReplay: false);
+    }
+
+    private async ValueTask<AccountWallet> ApplyAsync(long walletId, decimal amount, string currency, BalanceStrategyType strategyType, CancellationToken cancellationToken)
+    {
+        var wallet = await _walletRepository.GetByIdAsync(walletId, cancellationToken);
+        if (wallet is null) throw new WalletNotFoundException(walletId);
+
+        var strategy = _strategyFactory.GetStrategy(strategyType);
+        var walletAmount = await ToWalletCurrencyAsync(amount, currency, wallet, cancellationToken);
+        strategy.Apply(wallet, walletAmount);
+
+        return wallet;
     }
 
     // An adjustment in another currency is converted at the latest rate before the strategy applies it, so balance
