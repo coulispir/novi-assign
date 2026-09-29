@@ -12,6 +12,8 @@ using Ecb.Gateway.Models;
 
 using FluentAssertions;
 
+using Microsoft.Extensions.Options;
+
 namespace Integration.Tests.Gateways;
 
 /// <summary>
@@ -98,8 +100,20 @@ public sealed class EcbClientTests
         await fetch.Should().ThrowAsync<FormatException>();
     }
 
+    [Fact]
+    public async Task RequestsTheConfiguredFeedUrl()
+    {
+        var handler = new StubHandler(Feed("2026-09-25", """<Cube currency="USD" rate="1.1403"/>"""), HttpStatusCode.OK);
+
+        await new EcbClient(new HttpClient(handler), Options.Create(new EcbClientOptions { DailyRatesUrl = FeedUrl })).GetDailyRatesAsync();
+
+        handler.RequestedUri.Should().Be(FeedUrl);
+    }
+
+    private static readonly Uri FeedUrl = new("https://ecb.example/eurofxref-daily.xml");
+
     private static EcbClient CreateGateway(string body, HttpStatusCode status = HttpStatusCode.OK) =>
-        new(new HttpClient(new StubHandler(body, status)));
+        new(new HttpClient(new StubHandler(body, status)), Options.Create(new EcbClientOptions { DailyRatesUrl = FeedUrl }));
 
     private static string Feed(string date, string currencyCubes) => $"""
         <?xml version="1.0" encoding="UTF-8"?>
@@ -115,10 +129,16 @@ public sealed class EcbClientTests
 
     private sealed class StubHandler(string body, HttpStatusCode status) : HttpMessageHandler
     {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
-            Task.FromResult(new HttpResponseMessage(status)
+        public Uri? RequestedUri { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestedUri = request.RequestUri;
+
+            return Task.FromResult(new HttpResponseMessage(status)
             {
                 Content = new StringContent(body, Encoding.UTF8, "text/xml"),
             });
+        }
     }
 }

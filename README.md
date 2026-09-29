@@ -156,7 +156,7 @@ The Redis connection string is `ConnectionStrings:Redis`, set to `redis:6379` in
 
 ## ECB rate sync
 
-[EcbSyncJob](src/Core.Service/Jobs/EcbSyncJob.cs) runs every minute (Quartz, on one node per trigger). It fetches the daily ECB feed through the [Ecb.Gateway](src/Ecb.Gateway/EcbClient.cs) library, saves the rates to SQL Server, then refreshes the [currency rates cache](#currency-rates-cache).
+[EcbSyncJob](src/Core.Service/Jobs/EcbSyncJob.cs) runs on startup and then every minute by default (Quartz, on one node per trigger). It fetches the daily ECB feed through the [Ecb.Gateway](src/Ecb.Gateway/EcbClient.cs) library, saves the rates to SQL Server, then refreshes the [currency rates cache](#currency-rates-cache).
 
 ```
 ECB feed ──► EcbClient (Ecb.Gateway: EcbDailyRates) ──► EcbGatewayAdapter (+ EUR, EcbRateResult) ──► EcbRatesService (validate, de-duplicate) ──► one MERGE ──► CurrencyValues
@@ -180,6 +180,25 @@ ECB feed ──► EcbClient (Ecb.Gateway: EcbDailyRates) ──► EcbGatewayAd
 - **Limit:** SQL Server allows 2100 parameters per statement and each rate uses 4, so one merge takes at most 500 rates (`MaxRatesPerMerge`). The daily feed has about 30.
 - **Safe to retry.** Running the same merge again changes nothing, so EF's retry on transient SQL errors can safely repeat it.
 
+### Configuration
+
+The feed URL, the HTTP timeout and the job interval come from `appsettings.json` through the Options pattern:
+
+```json
+"Ecb": {
+  "DailyRatesUrl": "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml",
+  "Timeout": "00:00:15"
+},
+"EcbSync": {
+  "Interval": "00:01:00"
+}
+```
+
+- `Ecb` binds to the gateway library's `EcbClientOptions`, registered by [AddEcbGateway](src/App.Host/Infrastructure/Ecb/EcbServiceCollectionExtensions.cs). `Timeout` applies to each request to the feed.
+- `EcbSync:Interval` sets the Quartz trigger, registered by [AddEcbSyncJob](src/App.Host/Infrastructure/Jobs/EcbSyncServiceCollectionExtensions.cs). The trigger is stored in the clustered job store, and Quartz overwrites it on startup, so a new interval takes effect when the nodes restart. Keep `CurrencyRatesCache:TimeToLive` longer than the interval.
+- Like every setting, each can be overridden per environment, e.g. `EcbSync__Interval=00:05:00`.
+- The app refuses to start if the URL isn't an absolute http(s) URL, or the timeout or the interval is missing or not positive.
+
 ## Adjustments in another currency
 
 A balance adjustment can be made in any currency with a known exchange rate, not only the wallet's own. For example, `amount=50&currency=USD` on a EUR wallet converts the 50 USD to EUR and then applies the strategy:
@@ -199,7 +218,7 @@ curl -sS -X POST 'http://localhost:5000/api/wallets/1/adjustbalance?amount=50&cu
 Currency conversion (`GET /api/wallets/{walletId}?currency=USD`, and adjustments in another currency) reads exchange rates from Redis, not from SQL Server. The database is only queried when the cache is empty or unreachable.
 
 ```
-EcbSyncJob (every minute, one node) ──► SQL Server ──► latest rate per currency ──► Redis (replace snapshot)
+EcbSyncJob (every EcbSync:Interval, one node) ──► SQL Server ──► latest rate per currency ──► Redis (replace snapshot)
 GET /api/wallets/{id}?currency=X ──► Redis ──hit──► convert
                                         └──miss──► SQL Server ──► fill Redis if still empty ──► convert
 ```
@@ -221,7 +240,7 @@ GET /api/wallets/{id}?currency=X ──► Redis ──hit──► convert
 }
 ```
 
-- `TimeToLive` is only a safety net, since the job rewrites the snapshot every minute. It makes sure the key never lives forever, and that Redis can evict it under a `volatile-*` `maxmemory` policy. Keep it longer than the job interval, or requests will fall back to the database between runs.
+- `TimeToLive` is only a safety net, since the job rewrites the snapshot on every run (every minute by default). It makes sure the key never lives forever, and that Redis can evict it under a `volatile-*` `maxmemory` policy. Keep it longer than the job interval, or requests will fall back to the database between runs.
 - The app refuses to start if `TimeToLive` is missing or not positive.
 
 ### Code

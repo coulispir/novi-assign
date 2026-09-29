@@ -9,24 +9,30 @@ using System.Xml.Linq;
 
 using Ecb.Gateway.Models;
 
+using Microsoft.Extensions.Options;
+
 namespace Ecb.Gateway;
 
 public class EcbClient : IEcbClient
 {
-    private const string EcbUrl = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml";
     private static readonly XNamespace Namespace = "http://www.ecb.int/vocabulary/2002-08-01/eurofxref";
 
     private readonly HttpClient _httpClient;
+    private readonly Uri _dailyRatesUrl;
 
-    public EcbClient(HttpClient httpClient)
+    public EcbClient(HttpClient httpClient, IOptions<EcbClientOptions> options)
     {
+        ArgumentNullException.ThrowIfNull(options);
+
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _dailyRatesUrl = options.Value.DailyRatesUrl
+            ?? throw new ArgumentException($"{nameof(EcbClientOptions.DailyRatesUrl)} must be configured.", nameof(options));
     }
 
     public async Task<EcbDailyRates> GetDailyRatesAsync(CancellationToken cancellationToken = default)
     {
         // Stream the response rather than buffering it as a string
-        using var response = await _httpClient.GetAsync(new Uri(EcbUrl), HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        using var response = await _httpClient.GetAsync(_dailyRatesUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);

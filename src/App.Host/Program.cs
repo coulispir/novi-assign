@@ -3,12 +3,13 @@ using System.Threading.Tasks;
 
 using App.Host.Infrastructure;
 using App.Host.Infrastructure.Caching;
+using App.Host.Infrastructure.Ecb;
+using App.Host.Infrastructure.Jobs;
 using App.Host.Infrastructure.RateLimiting;
 
 using Core.Service.Data;
 using Core.Service.Handlers;
 using Core.Service.Interfaces;
-using Core.Service.Jobs;
 using Core.Service.Repositories;
 using Core.Service.Services;
 
@@ -19,8 +20,6 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-
-using Quartz;
 
 using Serilog;
 
@@ -56,15 +55,8 @@ builder.Services.AddDbContext<SystemDbContext>(options =>
         sqlOptions.MigrationsAssembly("Core.Service");
     }));
 
-// Register the external integration gateway using HttpClient factory pattern rules
-builder.Services.AddHttpClient<Ecb.Gateway.IEcbClient, Ecb.Gateway.EcbClient>(client =>
-{
-    client.Timeout = TimeSpan.FromSeconds(15);
-    client.DefaultRequestHeaders.Add("User-Agent", "WalletManagementSystem/1.0");
-});
-
-// The core's IEcbGateway port, implemented over the standalone gateway library
-builder.Services.AddScoped<IEcbGateway, App.Host.Infrastructure.Ecb.EcbGatewayAdapter>();
+// The standalone ECB client (feed URL and timeout from "Ecb") and the core's IEcbGateway port over it
+builder.Services.AddEcbGateway(builder.Configuration);
 
 // Register application services and data repositories
 builder.Services.AddScoped<ICurrencyValueRepository, CurrencyValueRepository>();
@@ -74,34 +66,8 @@ builder.Services.AddScoped<IWalletRepository, WalletRepository>();
 builder.Services.AddScoped<IWalletService, WalletService>();
 builder.Services.AddScoped<IWalletHandler, WalletHandler>();
 
-// Schedule the ECB rate synchronization job to run on startup and every minute thereafter
-builder.Services.AddQuartz(q =>
-{
-    // Nodes join the same cluster by sharing the (default) scheduler name; each needs a unique instance id
-    q.UseInstanceIdGenerator<UniqueNodeInstanceIdGenerator>();
-
-    // Clustered SQL Server job store: each trigger fire is acquired by exactly one node, and
-    // [DisallowConcurrentExecution] is enforced cluster-wide. If a node dies, another one takes over.
-    q.UsePersistentStore(store =>
-    {
-        store.UseSqlServer(connectionString);
-        store.UseSystemTextJsonSerializer();
-        store.UseClustering();
-        store.ProvisionSchema(); // Creates the QRTZ_* tables on first startup if they are missing
-    });
-
-    q.AddJob<EcbSyncJob>(opts => opts.WithIdentity(EcbSyncJob.Key));
-
-    q.AddTrigger(opts => opts
-        .ForJob(EcbSyncJob.Key)
-        .WithIdentity($"{nameof(EcbSyncJob)}-trigger")
-        .StartNow()
-        .WithSimpleSchedule(schedule => schedule
-            .WithInterval(TimeSpan.FromMinutes(1))
-            .RepeatForever()));
-});
-
-builder.Services.AddQuartzHostedService(options => options.WaitForJobsToComplete = true);
+// Sync ECB rates on startup and then every "EcbSync:Interval", on one node of the Quartz cluster at a time
+builder.Services.AddEcbSyncJob(builder.Configuration, connectionString);
 
 // Shared Redis connection, the currency rates cache and rate limiting backed by it, and real client IP resolution behind load balancers
 builder.Services.AddRedis(builder.Configuration);
