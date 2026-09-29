@@ -13,6 +13,20 @@ This starts SQL Server, Redis and the API on `http://localhost:${APP_PORT}` (def
 
 The default Compose setup is a development environment: it runs the API from source with `dotnet watch` (hot reload) and connects to SQL Server as `sa`. SQL Server data is kept in the `mssql-data` volume; `docker compose down -v` wipes it. See [Production considerations](#production-considerations) for what changes in a real deployment.
 
+### API documentation
+
+In Development, the API publishes an [OpenAPI](https://www.openapis.org/) 3.0 document and a Swagger UI to browse and try it:
+
+- Swagger UI: `http://localhost:5000/swagger`
+- OpenAPI document: `http://localhost:5000/openapi/v1.json`. Share it, or generate clients from it.
+
+The document is generated at runtime by ASP.NET Core's built-in `Microsoft.AspNetCore.OpenApi`, from the controllers' routes, parameters and `[ProducesResponseType]` attributes. Swagger UI (`Swashbuckle.AspNetCore.SwaggerUI`) only renders it. Both are registered in [ApiDocumentationExtensions.cs](src/App.Host/Infrastructure/ApiDocumentationExtensions.cs).
+
+- **OpenAPI 3.0, not the .NET 10 default of 3.1.** Client generators (e.g. openapi-generator for Kotlin) support 3.0 more reliably.
+- **Numbers are documented as plain numbers.** ASP.NET Core's JSON defaults also accept numbers sent as strings, so .NET generates every number as "number or string" (a type list in 3.1, `anyOf` in 3.0). Swagger UI can't fill in such a parameter and rejects every value as missing (`amount: Required field is not provided`), and generated clients would type amounts as strings. A schema transformer keeps only the number type. The API itself still accepts both.
+- **Development only.** Production doesn't publish its API surface, so the [load-balanced setup](#load-balanced-setup), which runs as `Production`, has no `/swagger`.
+- **Every response must be declared.** A status code without a `[ProducesResponseType]` is missing from the contract. [OpenApiDocumentTests](tests/Integration.Tests/OpenApi/OpenApiDocumentTests.cs) checks the endpoints, the `Idempotency-Key` header, every status code of `adjustbalance` and the `ErrorResponse` schema.
+
 ### Load-balanced setup
 
 To see the app running the way it would in production, layer [docker-compose.lb.yml](docker-compose.lb.yml) on top of the default setup:
@@ -56,8 +70,8 @@ Every error the API returns has the same JSON body:
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `invalid_request` | Invalid input: non-positive amount, missing or too long `Idempotency-Key`, bad currency code, negative initial balance, unknown strategy, currency not matching the wallet |
-| 400 | `unsupported_currency` | No exchange rate is known for the requested conversion |
+| 400 | `invalid_request` | Invalid input: non-positive amount, missing or too long `Idempotency-Key`, bad currency code, negative initial balance, unknown strategy, an amount in another currency that converts to less than 0.0001 of the wallet's currency |
+| 400 | `unsupported_currency` | No exchange rate is known for the requested conversion or adjustment currency |
 | 404 | `wallet_not_found` | The wallet doesn't exist |
 | 409 | `concurrency_conflict` | Another request changed the wallet at the same time. Retry with the same `Idempotency-Key` |
 | 422 | `insufficient_funds` | `SubtractFundsStrategy` would take the balance below zero |
@@ -139,9 +153,23 @@ The real client IP is read from `X-Forwarded-For`, **but only when the request c
 
 The Redis connection string is `ConnectionStrings:Redis`, set to `redis:6379` in Docker Compose. One shared `IConnectionMultiplexer` is registered in [RedisServiceCollectionExtensions.cs](src/App.Host/Infrastructure/RedisServiceCollectionExtensions.cs). Rate limiting and the [currency rates cache](#currency-rates-cache) both use it, and any new Redis feature should too, rather than open a second connection.
 
+## Adjustments in another currency
+
+A balance adjustment can be made in any currency with a known exchange rate, not only the wallet's own. For example, `amount=50&currency=USD` on a EUR wallet converts the 50 USD to EUR and then applies the strategy:
+
+```bash
+curl -sS -X POST 'http://localhost:5000/api/wallets/1/adjustbalance?amount=50&currency=USD&strategy=AddFundsStrategy' -H "Idempotency-Key: $(uuidgen)"
+```
+
+- **Converted with the latest ECB rates**, through EUR (`amount / rate(from) * rate(to)`) and rounded to 4 decimal places, the precision balances are stored with. Balance conversion on `GET` uses the same [CurrencyConverter](src/Core.Service/Services/CurrencyConverter.cs), so the two never disagree. The rates come from the [currency rates cache](#currency-rates-cache).
+- **Balance rules apply to the converted amount.** `SubtractFundsStrategy` compares the converted amount with the balance, so it rejects anything that would take the wallet below zero in its own currency (`422 insufficient_funds`).
+- **The response is in the wallet's currency.** It returns the wallet's new balance, as for any adjustment.
+- **Failures leave the balance unchanged:** a currency without a rate is rejected with `400 unsupported_currency`, and an amount that converts to less than 0.0001 of the wallet's currency with `400 invalid_request`.
+- **Retries replay the original result.** An adjustment retried with the same `Idempotency-Key` returns the balance from the first attempt, even if the rates changed in between. It is never converted again.
+
 ## Currency rates cache
 
-Currency conversion (`GET /api/wallets/{walletId}?currency=USD`) reads exchange rates from Redis, not from SQL Server. The database is only queried when the cache is empty or unreachable.
+Currency conversion (`GET /api/wallets/{walletId}?currency=USD`, and adjustments in another currency) reads exchange rates from Redis, not from SQL Server. The database is only queried when the cache is empty or unreachable.
 
 ```
 EcbSyncJob (every minute, one node) ──► SQL Server ──► latest rate per currency ──► Redis (replace snapshot)
@@ -196,7 +224,7 @@ The tests follow the layers of the code, and each layer is tested with the light
 - **Domain:** wallet creation and credit/debit/force-debit rules, currency rate validation, each balance strategy, and strategy lookup, including which domain exception each rule throws (see [Errors](#errors)).
 - **Application:**
   - the ECB upsert (insert, update, skip unchanged, de-duplicate, empty feed);
-  - conversion maths through EUR, including rounding;
+  - conversion maths through EUR, including rounding, in `CurrencyConverter`;
   - handler input validation;
   - cache-aside reads;
   - the job refreshing the cache only after a successful sync.
@@ -216,7 +244,7 @@ These boot the real `Program.cs` (DI, middleware, migrations) against real SQL S
 
 - **Wallet lifecycle:** create, read, each strategy, and every error path (400, 404, and 422 for insufficient funds), each checked against its [error code](#errors). Failed requests leave the balance unchanged.
 - **Idempotency and concurrency:** replays, key reuse with a different request (422), parallel retries with the same key applied exactly once, and parallel adjustments never losing an update.
-- **Currency conversion:** the full path from ECB feed to sync job, SQL Server, Redis and the endpoint. Also: rates are served from Redis rather than SQL Server, an empty cache falls back to the database and refills, new rates are served after a sync, and a currency the ECB drops keeps its last rate.
+- **Currency conversion:** the full path from ECB feed to sync job, SQL Server, Redis and the endpoint. Also: rates are served from Redis rather than SQL Server, an empty cache falls back to the database and refills, new rates are served after a sync, and a currency the ECB drops keeps its last rate. Adjustments in another currency: credits and debits at the synced rate (including between two non-EUR currencies), the overdraft rule checked on the converted amount, and unknown currencies or amounts too small to convert rejected without changing the balance.
 
 A few design choices keep these tests reliable:
 

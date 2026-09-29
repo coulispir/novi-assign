@@ -50,11 +50,9 @@ public class WalletService : IWalletService
         var wallet = await _walletRepository.GetByIdAsync(walletId, cancellationToken);
         if (wallet is null) throw new WalletNotFoundException(walletId);
 
-        if (!string.Equals(wallet.Currency, currency, StringComparison.OrdinalIgnoreCase))
-            throw new DomainValidationException($"Currency mismatch. Transaction must match wallet base currency: {wallet.Currency}.");
-
         var strategy = _strategyFactory.GetStrategy(strategyName);
-        strategy.Apply(wallet, amount);
+        var walletAmount = await ToWalletCurrencyAsync(amount, currency, wallet, cancellationToken);
+        strategy.Apply(wallet, walletAmount);
 
         // Saved in the same SaveChanges as the balance update, so both commit or neither does
         _dbContext.IdempotencyRecords.Add(IdempotencyRecord.Create(idempotencyKey, requestHash, wallet));
@@ -79,6 +77,21 @@ public class WalletService : IWalletService
         }
 
         return new WalletAdjustmentResult(wallet.Id, wallet.Currency, wallet.Balance, IsReplay: false);
+    }
+
+    // An adjustment in another currency is converted at the latest rate before the strategy applies it, so balance
+    // rules such as "no overdraft" are checked in the wallet's own currency
+    private async ValueTask<decimal> ToWalletCurrencyAsync(decimal amount, string currency, AccountWallet wallet, CancellationToken cancellationToken)
+    {
+        if (string.Equals(wallet.Currency, currency, StringComparison.OrdinalIgnoreCase)) return amount;
+
+        var rates = await _currencyRatesProvider.GetLatestRatesAsync(cancellationToken);
+        var walletAmount = CurrencyConverter.Convert(amount, currency, wallet.Currency, rates);
+
+        if (walletAmount <= 0)
+            throw new DomainValidationException($"{amount} {currency.ToUpperInvariant()} is less than 0.0001 {wallet.Currency} after conversion; a wallet can't hold a smaller amount.");
+
+        return walletAmount;
     }
 
     private ValueTask<IdempotencyRecord?> FindIdempotencyRecordAsync(string idempotencyKey, CancellationToken cancellationToken)
@@ -115,21 +128,6 @@ public class WalletService : IWalletService
         string upperTarget = targetCurrency.ToUpperInvariant();
 
         var rates = await _currencyRatesProvider.GetLatestRatesAsync(cancellationToken);
-
-        var walletCurrencyRate = GetEuroRate(rates, wallet.Currency);
-        var targetCurrencyRate = GetEuroRate(rates, upperTarget);
-
-        if (walletCurrencyRate is null || targetCurrencyRate is null || walletCurrencyRate == 0)
-            throw new UnsupportedCurrencyException($"No exchange rate is available for converting {wallet.Currency} to {upperTarget}.");
-
-        decimal outputBalance = (wallet.Balance / walletCurrencyRate.Value) * targetCurrencyRate.Value;
-        return (wallet, Math.Round(outputBalance, 4), upperTarget);
-    }
-
-    private static decimal? GetEuroRate(IReadOnlyDictionary<string, decimal> rates, string currency)
-    {
-        if (currency == "EUR") return 1.0m;
-
-        return rates.TryGetValue(currency, out var rate) ? rate : null;
+        return (wallet, CurrencyConverter.Convert(wallet.Balance, wallet.Currency, upperTarget, rates), upperTarget);
     }
 }

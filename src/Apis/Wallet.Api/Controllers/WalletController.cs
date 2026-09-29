@@ -16,7 +16,7 @@ namespace Wallet.Api.Controllers;
 [ApiController]
 [Route("api/wallets")] // Hardcoded lowercase route ensures stable mapping inside Linux containers
 [TypeFilter<ApiExceptionFilter>] // Maps domain exceptions to status codes, so actions only handle the success path
-[ProducesResponseType(StatusCodes.Status429TooManyRequests)]
+[ProducesResponseType(StatusCodes.Status429TooManyRequests, Type = typeof(ErrorResponse))] // Written by the rate limiter, same body shape
 [ProducesResponseType(StatusCodes.Status500InternalServerError, Type = typeof(ErrorResponse))]
 public class WalletController : ControllerBase
 {

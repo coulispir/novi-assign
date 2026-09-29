@@ -74,7 +74,6 @@ public sealed class WalletLifecycleTests
 
     public static TheoryData<decimal, string, string, string?> InvalidAdjustments => new()
     {
-        { 10m, "USD", "AddFundsStrategy", WalletApiClient.NewIdempotencyKey() },   // currency differs from the wallet's
         { 10m, "EUR", "TransferStrategy", WalletApiClient.NewIdempotencyKey() },   // unknown strategy
         { 0m, "EUR", "AddFundsStrategy", WalletApiClient.NewIdempotencyKey() },    // non-positive amount
         { 10m, "EUR", "AddFundsStrategy", null },                                  // missing Idempotency-Key

@@ -10,6 +10,9 @@ curl -sS -X POST 'http://localhost:5000/api/wallets/1/adjustbalance?amount=10&cu
 
 curl -sS -X POST 'http://localhost:5000/api/wallets/1/adjustbalance?amount=10&currency=EUR&strategy=ForceSubtractFundsStrategy' -H "Idempotency-Key: $(uuidgen)"
 
+# Adjustments can be made in another currency: the amount is converted to the wallet's currency at the latest ECB rate
+curl -sS -X POST 'http://localhost:5000/api/wallets/1/adjustbalance?amount=10&currency=USD&strategy=AddFundsStrategy' -H "Idempotency-Key: $(uuidgen)"
+
 # Idempotency: sending the same key twice applies the adjustment once; the second response carries "Idempotent-Replayed: true"
 KEY=$(uuidgen)
 curl -sS -i -X POST 'http://localhost:5000/api/wallets/1/adjustbalance?amount=5&currency=EUR&strategy=AddFundsStrategy' -H "Idempotency-Key: $KEY"
