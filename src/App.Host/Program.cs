@@ -65,8 +65,9 @@ builder.Services.AddScoped<ICurrencyValueRepository, CurrencyValueRepository>();
 builder.Services.AddScoped<ICurrencyRatesProvider, CurrencyRatesProvider>();
 builder.Services.AddScoped<IEcbRatesService, EcbRatesService>();
 builder.Services.AddScoped<IWalletRepository, WalletRepository>();
-builder.Services.AddScoped<IWalletService, WalletService>();
-builder.Services.AddScoped<IWalletHandler, WalletHandler>();
+builder.Services.AddScoped<ICreateWalletHandler, CreateWalletHandler>();
+builder.Services.AddScoped<IGetBalanceHandler, GetBalanceHandler>();
+builder.Services.AddScoped<IAdjustBalanceHandler, AdjustBalanceHandler>();
 
 // Sync ECB rates on startup and then every "EcbSync:Interval", on one node of the Quartz cluster at a time
 builder.Services.AddEcbSyncJob(builder.Configuration, connectionString);

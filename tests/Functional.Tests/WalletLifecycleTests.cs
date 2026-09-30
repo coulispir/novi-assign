@@ -76,6 +76,7 @@ public sealed class WalletLifecycleTests
     {
         { 10m, "EUR", "TransferStrategy", WalletApiClient.NewIdempotencyKey() },   // unknown strategy
         { 0m, "EUR", "AddFundsStrategy", WalletApiClient.NewIdempotencyKey() },    // non-positive amount
+        { 10m, "EUR", "AddFundsStrategy", WalletApiClient.NewIdempotencyKey().PadRight(101, 'k') }, // key longer than 100 characters
     };
 
     [Theory]
@@ -101,6 +102,18 @@ public sealed class WalletLifecycleTests
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         response.Headers.Contains("Idempotent-Replayed").Should().BeFalse();
         (await response.Content.ReadFromJsonAsync<WalletDto>()).Should().Be(new WalletDto(wallet.Id, "EUR", 25m));
+    }
+
+    [Fact]
+    public async Task AcceptsAnIdempotencyKeyOfTheMaximumLength()
+    {
+        // 100 characters is the documented limit, so the key column must hold it
+        var wallet = await _api.CreateWalletAsync("EUR", 20m);
+
+        using var response = await _api.AdjustAsync(wallet.Id, 5m, "EUR", "AddFundsStrategy", WalletApiClient.NewIdempotencyKey().PadRight(100, 'k'));
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await _api.GetBalanceAsync(wallet.Id)).OriginalBalance.Should().Be(25m);
     }
 
     [Fact]

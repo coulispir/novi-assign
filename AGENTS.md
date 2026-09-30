@@ -35,11 +35,11 @@ Migrations are applied automatically at startup ([Program.cs](src/App.Host/Progr
 src/
   App.Host/          Composition root: Program.cs, DI, middleware, config, Redis/rate limiting/caching/forwarded headers
   Apis/Wallet.Api/   Controllers, response models, RateLimitPolicies (a class library loaded as an application part)
-  Core.Service/      Domain and application logic: entities, handlers, services, strategies, repositories,
+  Core.Service/      Domain and application logic: entities, handlers (one per use case), services, strategies, repositories,
                      EF DbContext + migrations, Quartz jobs, interfaces for everything external
   Ecb.Gateway/       Standalone ECB client library: IEcbClient -> EcbDailyRates (no project references)
 tests/
-  Unit.Tests/        Domain/ (entities, strategies; no mocks) and Application/ (handler, services, job; NSubstitute)
+  Unit.Tests/        Domain/ (entities, strategies; no mocks) and Application/ (handlers, services, job; NSubstitute)
   Integration.Tests/ References App.Host; real Redis via Testcontainers, in-memory TestServer
   Functional.Tests/  The real Program.cs end to end via WebApplicationFactory; SQL Server + Redis containers
 ```
@@ -54,10 +54,15 @@ Dependencies point inward, towards `Core.Service`:
 ## Request flow
 
 ```
-WalletController (Wallet.Api)  ->  IWalletHandler (validates input, maps commands/queries)
-                               ->  IWalletService (business logic, transactions, idempotency)
-                               ->  IWalletRepository / SystemDbContext, IBalanceStrategyFactory, ICurrencyRatesProvider
+WalletController (Wallet.Api)  ->  ICreateWalletHandler   (command)  ->  IWalletRepository
+                               ->  IAdjustBalanceHandler  (command)  ->  IWalletRepository / SystemDbContext, IBalanceStrategyFactory, ICurrencyRatesProvider
+                               ->  IGetBalanceHandler     (query)    ->  IWalletRepository.GetByIdReadOnlyAsync, ICurrencyRatesProvider
 ```
+
+- **One handler per use case**, in [Core.Service/Handlers](src/Core.Service/Handlers), with its command/query and result records in the same file and a single `HandleAsync`. A new endpoint gets a new handler; don't regroup them into a shared service.
+- A handler **validates its own input** (it is the use case, so nothing may rely on a caller having checked first) and **returns a result record, never an entity**. The controller maps results to response models in `Wallet.Api/Models`; don't return core types from actions.
+- Queries never save, so they load with `GetByIdReadOnlyAsync` (no tracking). Commands use the tracked `GetByIdAsync`.
+- Test hosts substitute each handler interface the controller needs (`ErrorResponseTests`, `OpenApiDocumentTests`, `RateLimitedApp`).
 
 Middleware order in `Program.cs` matters: `UseForwardedHeaders` (first, so the real client IP is known) -> `UseSerilogRequestLogging` -> `UseRouting` -> `UseRateLimiter` (after routing, so `[EnableRateLimiting]` resolves) -> `MapControllers`. The integration test host [RateLimitedApp.cs](tests/Integration.Tests/RateLimiting/RateLimitedApp.cs) mirrors this order; change both together.
 
@@ -108,7 +113,7 @@ Rules:
 - Currency codes are 3-letter ISO, stored upper-case as `char(3)` (non-Unicode). Compare case-insensitively.
 - All rates are **relative to EUR**. EUR is always 1 (the gateway injects it, and `CurrencyConverter` short-circuits it). Conversion is `amount / rate(from) * rate(to)`, rounded to 4 decimals.
 - **All conversion goes through [CurrencyConverter](src/Core.Service/Services/CurrencyConverter.cs)**: balance display on `GET` and adjustments in another currency. Don't duplicate the maths.
-- **Adjustments may be in any currency with a rate.** `WalletService` converts the amount to the wallet's currency *before* the strategy runs, so balance rules (no overdraft) apply in the wallet's currency. An amount that rounds to 0 after conversion is a `DomainValidationException`; a currency without a rate is an `UnsupportedCurrencyException`.
+- **Adjustments may be in any currency with a rate.** `AdjustBalanceHandler` converts the amount to the wallet's currency *before* the strategy runs, so balance rules (no overdraft) apply in the wallet's currency. An amount that rounds to 0 after conversion is a `DomainValidationException`; a currency without a rate is an `UnsupportedCurrencyException`.
 
 **Entities** ([Core.Service/Entities](src/Core.Service/Entities))
 - Private setters, a private parameterless constructor for EF, a static `Create(...)` factory that validates, and behaviour methods (`Credit`, `Debit`, `ForceDebit`, `UpdateRate`) that set `UpdatedAt`. Don't add public setters; add a method.
@@ -123,7 +128,7 @@ Rules:
 - `SubtractFundsStrategy` rejects going negative (through `AccountWallet.Debit`, which throws `InsufficientFundsException`); `ForceSubtractFundsStrategy` allows it on purpose (`ForceDebit`).
 - `AccountWallet.RowVersion` is an optimistic concurrency token. Concurrent updates surface as `DbUpdateConcurrencyException`, which becomes `ConcurrencyConflictException` (409). Don't add locks around it. Any other `DbUpdateException` is rethrown and becomes a 500.
 
-**Idempotency** ([WalletService.AdjustBalanceAsync](src/Core.Service/Services/WalletService.cs))
+**Idempotency** ([AdjustBalanceHandler](src/Core.Service/Handlers/AdjustBalanceHandler.cs))
 - `Idempotency-Key` is **optional**: the endpoint must keep working exactly as the assignment's URL, with no header. A missing or empty key → no idempotency (`AdjustWithoutIdempotencyAsync`: no lookup, hash or record; each request applies). A key that is sent must be 1-100 characters (`IdempotencyRecord.MaxKeyLength`) and not blank, or it's a `DomainValidationException` (400). Never make the header required again.
 - The `IdempotencyRecord` is saved in **the same `SaveChanges`** as the balance change, so both commit or neither does. Keep that when changing this code.
 - The request hash is SHA-256 over normalised `walletId|amount|CURRENCY|strategy`. The same key with the same request replays the stored result; the same key with a different request -> 422.
@@ -179,9 +184,9 @@ Rules:
 
 Test each layer with the lightest setup that can still catch its bugs. The README's "Tests" section has the full breakdown.
 
-- **Unit tests** (`tests/Unit.Tests`): xUnit + NSubstitute + FluentAssertions. `Domain/` tests entities and strategies with no mocks; `Application/` tests the handler, services and job with ports mocked. Assert the exact domain exception type each rule throws. Mock interfaces, not `DbContext`. Names follow `Method_Scenario_Result`.
-- **Integration tests** (`tests/Integration.Tests`): infrastructure adapters. Redis tests join `[Collection(RedisCollection.Name)]` to share the Testcontainers Redis ([RedisFixture.cs](tests/Integration.Tests/RedisFixture.cs)). Tests in that collection run one at a time, so isolate state: rate limit tests take a fresh IP from `RateLimitedApp.NextClientIp()`, and cache tests reset their key first. They register the **production** extension methods (`AddRedis`, `AddClientIpRateLimiting`, ...) rather than rebuilding them, and substitute the wallet handler, so there is no SQL Server here.
-- **Error handling tests** ([ErrorResponseTests](tests/Integration.Tests/ErrorHandling/ErrorResponseTests.cs)): the real controller on a TestServer with a throwing handler substitute. No Redis needed.
+- **Unit tests** (`tests/Unit.Tests`): xUnit + NSubstitute + FluentAssertions. `Domain/` tests entities and strategies with no mocks; `Application/` tests the handlers, services and job with ports mocked. Assert the exact domain exception type each rule throws. Mock interfaces, not `DbContext`. Names follow `Method_Scenario_Result`.
+- **Integration tests** (`tests/Integration.Tests`): infrastructure adapters. Redis tests join `[Collection(RedisCollection.Name)]` to share the Testcontainers Redis ([RedisFixture.cs](tests/Integration.Tests/RedisFixture.cs)). Tests in that collection run one at a time, so isolate state: rate limit tests take a fresh IP from `RateLimitedApp.NextClientIp()`, and cache tests reset their key first. They register the **production** extension methods (`AddRedis`, `AddClientIpRateLimiting`, ...) rather than rebuilding them, and substitute the wallet handlers, so there is no SQL Server here.
+- **Error handling tests** ([ErrorResponseTests](tests/Integration.Tests/ErrorHandling/ErrorResponseTests.cs)): the real controller on a TestServer with throwing handler substitutes. No Redis needed.
 - **Functional tests** (`tests/Functional.Tests`): the real `Program.cs` against SQL Server and Redis containers, through [WalletApiFactory](tests/Functional.Tests/Infrastructure/WalletApiFactory.cs); only the ECB feed is faked ([FakeEcbFeed](tests/Functional.Tests/Infrastructure/FakeEcbFeed.cs)). The Quartz scheduler doesn't run: call `EcbSyncJob` explicitly when a test needs a sync. Every test creates its own wallets and never relies on another test's data. The tests keep **their own copies of the response contracts** (`WalletDto`, `ErrorDto`, ...) on purpose, so don't replace them with the API's types. Assert errors with `response.ShouldBeErrorAsync(status, "code")`.
 - New behaviour needs tests at the matching level, including the Redis-down (fail-open) path for anything that touches Redis, and a functional test for anything that depends on SQL Server behaviour (row versions, unique keys).
 

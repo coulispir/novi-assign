@@ -8,9 +8,7 @@ using System.Threading.Tasks;
 using App.Host.Infrastructure;
 using App.Host.Infrastructure.RateLimiting;
 
-using Core.Service.Entities;
 using Core.Service.Handlers;
-using Core.Service.Services;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -84,7 +82,7 @@ internal sealed class RateLimitedApp : IAsyncDisposable
         builder.Services.AddRedis(builder.Configuration);
         builder.Services.AddTrustedForwardedHeaders(builder.Configuration);
         builder.Services.AddClientIpRateLimiting(builder.Configuration, RateLimitPolicies.All);
-        builder.Services.AddSingleton(CreateWalletHandler());
+        AddWalletHandlers(builder.Services);
         builder.Services.AddWalletApi();
 
         var app = builder.Build();
@@ -159,17 +157,22 @@ internal sealed class RateLimitedApp : IAsyncDisposable
         return next();
     }
 
-    private static IWalletHandler CreateWalletHandler()
+    private static void AddWalletHandlers(IServiceCollection services)
     {
-        var handler = Substitute.For<IWalletHandler>();
+        var getBalance = Substitute.For<IGetBalanceHandler>();
+        getBalance.HandleAsync(default!, default)
+            .ReturnsForAnyArgs(new BalanceResult(1, 10m, "EUR", 10m, "EUR"));
 
-        handler.HandleQueryAsync(default!, default)
-            .ReturnsForAnyArgs(new BalanceDisplayResult(1, 10m, "EUR", 10m, "EUR"));
-        handler.HandleCreateAsync(default!, default)
-            .ReturnsForAnyArgs(_ => AccountWallet.Create("EUR", 10m));
-        handler.HandleAdjustmentAsync(default!, default)
+        var createWallet = Substitute.For<ICreateWalletHandler>();
+        createWallet.HandleAsync(default!, default)
+            .ReturnsForAnyArgs(new WalletResult(1, "EUR", 10m));
+
+        var adjustBalance = Substitute.For<IAdjustBalanceHandler>();
+        adjustBalance.HandleAsync(default!, default)
             .ReturnsForAnyArgs(new WalletAdjustmentResult(1, "EUR", 20m, IsReplay: false));
 
-        return handler;
+        services.AddSingleton(getBalance);
+        services.AddSingleton(createWallet);
+        services.AddSingleton(adjustBalance);
     }
 }
