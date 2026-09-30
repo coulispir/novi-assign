@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -11,20 +10,33 @@ using Core.Service.Entities;
 using Core.Service.Exceptions;
 using Core.Service.Interfaces;
 using Core.Service.Repositories;
+using Core.Service.Services;
 using Core.Service.Strategies;
 
 using Microsoft.EntityFrameworkCore;
 
-namespace Core.Service.Services;
+namespace Core.Service.Handlers;
 
-public class WalletService : IWalletService
+public record AdjustBalanceCommand(long WalletId, decimal Amount, string Currency, BalanceStrategyType Strategy, string? IdempotencyKey);
+public record WalletAdjustmentResult(long WalletId, string Currency, decimal Balance, bool IsReplay);
+
+/// <summary>
+/// Applies a balance strategy to a wallet, converting the amount to the wallet's currency first. With an
+/// idempotency key, a retry of the same request replays the stored result instead of applying it again.
+/// </summary>
+public interface IAdjustBalanceHandler
+{
+    ValueTask<WalletAdjustmentResult> HandleAsync(AdjustBalanceCommand command, CancellationToken cancellationToken);
+}
+
+public class AdjustBalanceHandler : IAdjustBalanceHandler
 {
     private readonly IWalletRepository _walletRepository;
     private readonly SystemDbContext _dbContext;
     private readonly IBalanceStrategyFactory _strategyFactory;
     private readonly ICurrencyRatesProvider _currencyRatesProvider;
 
-    public WalletService(IWalletRepository walletRepository, SystemDbContext dbContext, IBalanceStrategyFactory strategyFactory, ICurrencyRatesProvider currencyRatesProvider)
+    public AdjustBalanceHandler(IWalletRepository walletRepository, SystemDbContext dbContext, IBalanceStrategyFactory strategyFactory, ICurrencyRatesProvider currencyRatesProvider)
     {
         _walletRepository = walletRepository;
         _dbContext = dbContext;
@@ -32,19 +44,28 @@ public class WalletService : IWalletService
         _currencyRatesProvider = currencyRatesProvider;
     }
 
-    public async ValueTask<AccountWallet> CreateAsync(string currency, decimal initialBalance, CancellationToken cancellationToken)
+    public async ValueTask<WalletAdjustmentResult> HandleAsync(AdjustBalanceCommand command, CancellationToken cancellationToken)
     {
-        var wallet = AccountWallet.Create(currency, initialBalance);
-        _walletRepository.Add(wallet);
-        await _walletRepository.SaveChangesAsync(cancellationToken);
-        return wallet;
+        ArgumentNullException.ThrowIfNull(command);
+
+        if (command.Amount <= 0)
+            throw new DomainValidationException("The amount parameter must always be a positive number.");
+
+        // The key is optional: without one the adjustment simply runs. A key that is sent must be usable, though, so a
+        // blank or oversized one is a client error rather than silently treated as "no key".
+        var idempotencyKey = string.IsNullOrEmpty(command.IdempotencyKey) ? null : command.IdempotencyKey;
+
+        if (idempotencyKey is not null && (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length > IdempotencyRecord.MaxKeyLength))
+            throw new DomainValidationException($"The Idempotency-Key header is optional, but when sent it must be 1-{IdempotencyRecord.MaxKeyLength} characters and not blank.");
+
+        if (idempotencyKey is null)
+            return await AdjustWithoutIdempotencyAsync(command.WalletId, command.Amount, command.Currency, command.Strategy, cancellationToken);
+
+        return await AdjustWithIdempotencyAsync(command.WalletId, command.Amount, command.Currency, command.Strategy, idempotencyKey, cancellationToken);
     }
 
-    public async ValueTask<WalletAdjustmentResult> AdjustBalanceAsync(long walletId, decimal amount, string currency, BalanceStrategyType strategyType, string? idempotencyKey, CancellationToken cancellationToken)
+    private async ValueTask<WalletAdjustmentResult> AdjustWithIdempotencyAsync(long walletId, decimal amount, string currency, BalanceStrategyType strategyType, string idempotencyKey, CancellationToken cancellationToken)
     {
-        if (idempotencyKey is null)
-            return await AdjustWithoutIdempotencyAsync(walletId, amount, currency, strategyType, cancellationToken);
-
         var requestHash = ComputeRequestHash(walletId, amount, currency, strategyType);
 
         var existing = await FindIdempotencyRecordAsync(idempotencyKey, cancellationToken);
@@ -143,21 +164,5 @@ public class WalletService : IWalletService
         // hash identical to records stored when strategies were plain strings
         var payload = $"{walletId}|{normalizedAmount}|{currency.ToUpperInvariant()}|{strategyType.ToString().ToLowerInvariant()}";
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload)));
-    }
-
-    public async ValueTask<(AccountWallet Wallet, decimal CalculatedBalance, string TargetCurrency)> GetConvertedBalanceAsync(long walletId, string? targetCurrency, CancellationToken cancellationToken)
-    {
-        var wallet = await _walletRepository.GetByIdAsync(walletId, cancellationToken);
-        if (wallet is null) throw new WalletNotFoundException(walletId);
-
-        if (string.IsNullOrWhiteSpace(targetCurrency) || string.Equals(wallet.Currency, targetCurrency, StringComparison.OrdinalIgnoreCase))
-        {
-            return (wallet, wallet.Balance, wallet.Currency);
-        }
-
-        string upperTarget = targetCurrency.ToUpperInvariant();
-
-        var rates = await _currencyRatesProvider.GetLatestRatesAsync(cancellationToken);
-        return (wallet, CurrencyConverter.Convert(wallet.Balance, wallet.Currency, upperTarget, rates), upperTarget);
     }
 }

@@ -7,7 +7,6 @@ using System.Threading.Tasks;
 
 using Core.Service.Exceptions;
 using Core.Service.Handlers;
-using Core.Service.Services;
 using Core.Service.Strategies;
 
 using FluentAssertions;
@@ -27,12 +26,14 @@ using Wallet.Api.Models;
 namespace Integration.Tests.ErrorHandling;
 
 /// <summary>
-/// Hosts the real <c>WalletController</c> in memory with a handler that throws, to check how each failure reaches the
+/// Hosts the real <c>WalletController</c> in memory with handlers that throw, to check how each failure reaches the
 /// client. Rate limiting is left out, so no Redis is needed.
 /// </summary>
 public sealed class ErrorResponseTests : IAsyncLifetime
 {
-    private readonly IWalletHandler _handler = Substitute.For<IWalletHandler>();
+    private readonly ICreateWalletHandler _createWallet = Substitute.For<ICreateWalletHandler>();
+    private readonly IGetBalanceHandler _getBalance = Substitute.For<IGetBalanceHandler>();
+    private readonly IAdjustBalanceHandler _adjustBalance = Substitute.For<IAdjustBalanceHandler>();
     private WebApplication _app = null!;
     private HttpClient _client = null!;
 
@@ -41,7 +42,9 @@ public sealed class ErrorResponseTests : IAsyncLifetime
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
-        builder.Services.AddSingleton(_handler);
+        builder.Services.AddSingleton(_createWallet);
+        builder.Services.AddSingleton(_getBalance);
+        builder.Services.AddSingleton(_adjustBalance);
         builder.Services.AddWalletApi();
 
         _app = builder.Build();
@@ -72,7 +75,7 @@ public sealed class ErrorResponseTests : IAsyncLifetime
     [MemberData(nameof(DomainFailures))]
     public async Task MapsEachDomainFailureToItsStatusCodeAndCode(Exception exception, HttpStatusCode expectedStatus, string expectedCode)
     {
-        _handler.HandleAdjustmentAsync(default!, default).ThrowsAsyncForAnyArgs(exception);
+        _adjustBalance.HandleAsync(default!, default).ThrowsAsyncForAnyArgs(exception);
 
         using var response = await _client.SendAsync(AdjustBalance());
 
@@ -83,7 +86,7 @@ public sealed class ErrorResponseTests : IAsyncLifetime
     [Fact]
     public async Task ReturnsAGeneric500WithoutLeakingDetailsForUnexpectedExceptions()
     {
-        _handler.HandleQueryAsync(default!, default).ThrowsAsyncForAnyArgs(new InvalidOperationException("Login failed for user 'sa'."));
+        _getBalance.HandleAsync(default!, default).ThrowsAsyncForAnyArgs(new InvalidOperationException("Login failed for user 'sa'."));
 
         using var response = await _client.GetAsync(new Uri("/api/wallets/1", UriKind.Relative));
 
@@ -97,7 +100,7 @@ public sealed class ErrorResponseTests : IAsyncLifetime
     public async Task ArgumentExceptionsAreTreatedAsServerFaultsNotClientErrors()
     {
         // Only DomainValidationException means the client sent something invalid; a stray ArgumentException is a bug
-        _handler.HandleCreateAsync(default!, default).ThrowsAsyncForAnyArgs(new ArgumentNullException("currency"));
+        _createWallet.HandleAsync(default!, default).ThrowsAsyncForAnyArgs(new ArgumentNullException("currency"));
 
         using var response = await _client.PostAsJsonAsync(new Uri("/api/wallets", UriKind.Relative), new { currency = "EUR", initialBalance = 10 });
 
@@ -107,7 +110,7 @@ public sealed class ErrorResponseTests : IAsyncLifetime
     [Fact]
     public async Task SuccessfulRequestsAreUnaffected()
     {
-        _handler.HandleAdjustmentAsync(default!, default).ReturnsForAnyArgs(new WalletAdjustmentResult(1, "EUR", 20m, IsReplay: true));
+        _adjustBalance.HandleAsync(default!, default).ReturnsForAnyArgs(new WalletAdjustmentResult(1, "EUR", 20m, IsReplay: true));
 
         using var response = await _client.SendAsync(AdjustBalance());
 
@@ -135,7 +138,7 @@ public sealed class ErrorResponseTests : IAsyncLifetime
         var error = await response.Content.ReadFromJsonAsync<ErrorResponse>();
         error!.Code.Should().Be(ErrorCodes.InvalidRequest);
         error.Error.Should().Contain("strategy");
-        await _handler.DidNotReceiveWithAnyArgs().HandleAdjustmentAsync(default!, default);
+        await _adjustBalance.DidNotReceiveWithAnyArgs().HandleAsync(default!, default);
     }
 
     [Fact]
@@ -173,12 +176,12 @@ public sealed class ErrorResponseTests : IAsyncLifetime
     [Fact]
     public async Task BindsTheStrategyNameIgnoringCase()
     {
-        _handler.HandleAdjustmentAsync(default!, default).ReturnsForAnyArgs(new WalletAdjustmentResult(1, "EUR", 20m, IsReplay: false));
+        _adjustBalance.HandleAsync(default!, default).ReturnsForAnyArgs(new WalletAdjustmentResult(1, "EUR", 20m, IsReplay: false));
 
         using var response = await _client.SendAsync(AdjustBalance("amount=10&currency=EUR&strategy=forcesubtractfundsstrategy"));
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
-        await _handler.Received(1).HandleAdjustmentAsync(
+        await _adjustBalance.Received(1).HandleAsync(
             Arg.Is<AdjustBalanceCommand>(command => command.Strategy == BalanceStrategyType.ForceSubtractFundsStrategy),
             Arg.Any<System.Threading.CancellationToken>());
     }

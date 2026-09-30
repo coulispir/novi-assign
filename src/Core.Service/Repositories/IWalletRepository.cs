@@ -13,6 +13,9 @@ public interface IWalletRepository
     // ValueTask<T> avoids heap allocation if the Entity is already cached in DbContext memory
     ValueTask<AccountWallet?> GetByIdAsync(long id, CancellationToken cancellationToken);
 
+    // For reads that never save: the wallet isn't tracked, so it can't be modified by mistake
+    ValueTask<AccountWallet?> GetByIdReadOnlyAsync(long id, CancellationToken cancellationToken);
+
     void Add(AccountWallet wallet);
 
     // Non-generic ValueTask for operations that return nothing but run asynchronously
@@ -32,6 +35,11 @@ public class WalletRepository : IWalletRepository
     {
         // FindAsync natively looks into local tracker memory first before hitting SQL Server
         return await _dbContext.AccountWallets.FindAsync(new object[] { id }, cancellationToken);
+    }
+
+    public async ValueTask<AccountWallet?> GetByIdReadOnlyAsync(long id, CancellationToken cancellationToken)
+    {
+        return await _dbContext.AccountWallets.AsNoTracking().FirstOrDefaultAsync(wallet => wallet.Id == id, cancellationToken);
     }
 
     public void Add(AccountWallet wallet)

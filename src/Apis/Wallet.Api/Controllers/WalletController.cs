@@ -25,11 +25,15 @@ public class WalletController : ControllerBase
     private const string IdempotencyKeyHeader = "Idempotency-Key";
     private const string IdempotentReplayedHeader = "Idempotent-Replayed";
 
-    private readonly IWalletHandler _handler;
+    private readonly ICreateWalletHandler _createWallet;
+    private readonly IGetBalanceHandler _getBalance;
+    private readonly IAdjustBalanceHandler _adjustBalance;
 
-    public WalletController(IWalletHandler handler)
+    public WalletController(ICreateWalletHandler createWallet, IGetBalanceHandler getBalance, IAdjustBalanceHandler adjustBalance)
     {
-        _handler = handler;
+        _createWallet = createWallet;
+        _getBalance = getBalance;
+        _adjustBalance = adjustBalance;
     }
 
     // 📥 1. CREATE WALLET ENDPOINT
@@ -41,22 +45,22 @@ public class WalletController : ControllerBase
     public async Task<IActionResult> CreateWallet([FromBody] CreateWalletPayload payload, CancellationToken cancellationToken)
     {
         var command = new CreateWalletCommand(payload.Currency, payload.InitialBalance);
-        var wallet = await _handler.HandleCreateAsync(command, cancellationToken);
-        return StatusCode(StatusCodes.Status201Created, WalletResponse.From(wallet));
+        var result = await _createWallet.HandleAsync(command, cancellationToken);
+        return StatusCode(StatusCodes.Status201Created, new WalletResponse(result.WalletId, result.Currency, result.Balance));
     }
 
     // 📤 2. RETRIEVE WALLET BALANCE (WITH CURRENCY CONVERSION HINT)
     // GET /api/wallets/{walletId}?currency=USD
     [HttpGet("{walletId:long}")]
     [EnableRateLimiting(RateLimitPolicies.WalletRead)]
-    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(BalanceDisplayResult))]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(BalanceResponse))]
     [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ErrorResponse))]
     [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ErrorResponse))]
     public async Task<IActionResult> GetBalance([FromRoute] long walletId, [FromQuery] string? currency, CancellationToken cancellationToken)
     {
         var query = new GetBalanceQuery(walletId, currency);
-        var result = await _handler.HandleQueryAsync(query, cancellationToken);
-        return Ok(result);
+        var result = await _getBalance.HandleAsync(query, cancellationToken);
+        return Ok(new BalanceResponse(result.WalletId, result.OriginalBalance, result.OriginalCurrency, result.RequestedBalance, result.RequestedCurrency));
     }
 
     // 🛠️ 3. ADJUST WALLET BALANCE ENDPOINT
@@ -78,7 +82,7 @@ public class WalletController : ControllerBase
         CancellationToken cancellationToken)
     {
         var command = new AdjustBalanceCommand(walletId, amount, currency, strategy, idempotencyKey);
-        var result = await _handler.HandleAdjustmentAsync(command, cancellationToken);
+        var result = await _adjustBalance.HandleAsync(command, cancellationToken);
 
         if (result.IsReplay)
             Response.Headers[IdempotentReplayedHeader] = "true";

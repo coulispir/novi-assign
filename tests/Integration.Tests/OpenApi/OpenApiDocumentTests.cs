@@ -39,7 +39,9 @@ public sealed class OpenApiDocumentTests : IAsyncLifetime
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
-        builder.Services.AddSingleton(Substitute.For<IWalletHandler>());
+        builder.Services.AddSingleton(Substitute.For<ICreateWalletHandler>());
+        builder.Services.AddSingleton(Substitute.For<IGetBalanceHandler>());
+        builder.Services.AddSingleton(Substitute.For<IAdjustBalanceHandler>());
         builder.Services.AddWalletApi();
         builder.Services.AddApiDocumentation();
 
@@ -109,6 +111,18 @@ public sealed class OpenApiDocumentTests : IAsyncLifetime
 
         adjust.GetProperty("responses").EnumerateObject().Select(r => r.Name)
             .Should().BeEquivalentTo("200", "400", "404", "409", "422", "429", "500");
+    }
+
+    [Fact]
+    public void GetBalanceDocumentsTheBalanceResponseBody()
+    {
+        var ok = _document.GetProperty("paths").GetProperty("/api/wallets/{walletId}").GetProperty("get")
+            .GetProperty("responses").GetProperty("200");
+        ok.GetRawText().Should().Contain("#/components/schemas/BalanceResponse");
+
+        var properties = _document.GetProperty("components").GetProperty("schemas").GetProperty("BalanceResponse").GetProperty("properties");
+        properties.EnumerateObject().Select(p => p.Name)
+            .Should().BeEquivalentTo("walletId", "originalBalance", "originalCurrency", "requestedBalance", "requestedCurrency");
     }
 
     [Fact]
