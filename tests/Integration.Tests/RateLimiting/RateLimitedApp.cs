@@ -26,7 +26,7 @@ namespace Integration.Tests.RateLimiting;
 
 /// <summary>
 /// In-memory host running the real <c>WalletController</c> with the production rate limiting registrations and the
-/// same middleware order as <c>Program.cs</c>. Only the wallet handler is substituted, so no database is needed.
+/// same middleware order as <c>Program.cs</c>. Only the wallet handlers are substituted, so no database is needed.
 /// </summary>
 internal sealed class RateLimitedApp : IAsyncDisposable
 {

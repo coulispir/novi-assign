@@ -16,7 +16,7 @@ using Wallet.Api.Models;
 namespace Wallet.Api.Controllers;
 
 [ApiController]
-[Route("api/wallets")] // Hardcoded lowercase route ensures stable mapping inside Linux containers
+[Route("api/wallets")] // Written out in lower case rather than taken from the controller name
 [TypeFilter<ApiExceptionFilter>] // Maps domain exceptions to status codes, so actions only handle the success path
 [ProducesResponseType(StatusCodes.Status429TooManyRequests, Type = typeof(ErrorResponse))] // Written by the rate limiter, same body shape
 [ProducesResponseType(StatusCodes.Status500InternalServerError, Type = typeof(ErrorResponse))]
@@ -36,7 +36,6 @@ public class WalletController : ControllerBase
         _adjustBalance = adjustBalance;
     }
 
-    // 📥 1. CREATE WALLET ENDPOINT
     // POST /api/wallets
     [HttpPost]
     [EnableRateLimiting(RateLimitPolicies.WalletCreate)]
@@ -49,8 +48,7 @@ public class WalletController : ControllerBase
         return StatusCode(StatusCodes.Status201Created, new WalletResponse(result.WalletId, result.Currency, result.Balance));
     }
 
-    // 📤 2. RETRIEVE WALLET BALANCE (WITH CURRENCY CONVERSION HINT)
-    // GET /api/wallets/{walletId}?currency=USD
+    // GET /api/wallets/{walletId}?currency=USD, where currency is optional
     [HttpGet("{walletId:long}")]
     [EnableRateLimiting(RateLimitPolicies.WalletRead)]
     [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(BalanceResponse))]
@@ -63,9 +61,9 @@ public class WalletController : ControllerBase
         return Ok(new BalanceResponse(result.WalletId, result.OriginalBalance, result.OriginalCurrency, result.RequestedBalance, result.RequestedCurrency));
     }
 
-    // 🛠️ 3. ADJUST WALLET BALANCE ENDPOINT
-    // POST /api/wallets/{walletId}/adjustbalance?amount=50&currency=EUR&strategy=SubtractFundsStrategy (a BalanceStrategyType name)
-    // Optional header: Idempotency-Key: <client-generated unique value, e.g. a UUID>. With it, retries replay instead of re-applying.
+    // POST /api/wallets/{walletId}/adjustbalance?amount=50&currency=EUR&strategy=SubtractFundsStrategy
+    // strategy is a BalanceStrategyType name. With the optional Idempotency-Key header (e.g. a UUID), a retry gets the
+    // first result back instead of being applied again.
     [HttpPost("{walletId:long}/adjustbalance")]
     [EnableRateLimiting(RateLimitPolicies.WalletAdjust)]
     [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(WalletResponse))]

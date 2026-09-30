@@ -43,24 +43,23 @@ builder.Services.AddSingleton<Core.Service.Strategies.IBalanceStrategy, Core.Ser
 builder.Services.AddSingleton<Core.Service.Strategies.IBalanceStrategy, Core.Service.Strategies.ForceSubtractFundsStrategy>();
 builder.Services.AddSingleton<Core.Service.Strategies.IBalanceStrategyFactory, Core.Service.Strategies.BalanceStrategyFactory>();
 
-// Register the SystemDbContext using SQL Server defaults
 builder.Services.AddDbContext<SystemDbContext>(options =>
     options.UseSqlServer(connectionString, sqlOptions =>
     {
-        // Resiliency strategy: automatically handles transient network drops
+        // Retries short network blips and other transient SQL errors
         sqlOptions.EnableRetryOnFailure(
             maxRetryCount: 5,
             maxRetryDelay: TimeSpan.FromSeconds(10),
             errorNumbersToAdd: null);
 
-        // Tell EF Core that migrations live inside the Core.Service assembly, not here
+        // The migrations live in Core.Service, next to the DbContext
         sqlOptions.MigrationsAssembly("Core.Service");
     }));
 
 // The standalone ECB client (feed URL and timeout from "Ecb") and the core's IEcbGateway port over it
 builder.Services.AddEcbGateway(builder.Configuration);
 
-// Register application services and data repositories
+// Repositories, services and one handler per use case. All scoped, because they share the request's DbContext
 builder.Services.AddScoped<ICurrencyValueRepository, CurrencyValueRepository>();
 builder.Services.AddScoped<ICurrencyRatesProvider, CurrencyRatesProvider>();
 builder.Services.AddScoped<IEcbRatesService, EcbRatesService>();
@@ -72,16 +71,18 @@ builder.Services.AddScoped<IAdjustBalanceHandler, AdjustBalanceHandler>();
 // Sync ECB rates on startup and then every "EcbSync:Interval", on one node of the Quartz cluster at a time
 builder.Services.AddEcbSyncJob(builder.Configuration, connectionString);
 
-// Shared Redis connection, the currency rates cache and rate limiting backed by it, and real client IP resolution behind load balancers
+// The one Redis connection that the health check, the rates cache and rate limiting all share
 builder.Services.AddRedis(builder.Configuration);
 
 // /health (SQL Server + Redis) for the load balancer and readiness probes, /health/live for liveness probes
 builder.Services.AddDependencyHealthChecks(builder.Configuration, connectionString);
 builder.Services.AddCurrencyRatesCache(builder.Configuration);
+
+// The real client IP behind the load balancer, which the per-IP rate limits depend on
 builder.Services.AddTrustedForwardedHeaders(builder.Configuration);
 builder.Services.AddClientIpRateLimiting(builder.Configuration, Wallet.Api.RateLimitPolicies.All);
 
-// Add API Routing Controllers capability and dynamically discover external modules
+// The controllers from Wallet.Api, with every error returned in the same format
 builder.Services.AddWalletApi();
 
 // OpenAPI document generated from the controllers, browsable through Swagger UI in Development
@@ -125,8 +126,7 @@ if (app.Environment.IsDevelopment())
     app.MapApiDocumentation();
 }
 
-// AUTOMATED DB INITIALIZATION AUTOMATION
-// Creates database and applies migrations on startup if they don't exist yet
+// Create the database if it's missing and apply any pending migrations before taking requests
 await ApplyDatabaseMigrationsAsync(app);
 
 try
@@ -138,7 +138,6 @@ finally
     Log.CloseAndFlush();
 }
 
-// Scoped lifecycle management method for database migrations
 static async Task ApplyDatabaseMigrationsAsync(WebApplication app)
 {
     using var scope = app.Services.CreateScope();
@@ -155,15 +154,13 @@ static async Task ApplyDatabaseMigrationsAsync(WebApplication app)
         await EnsureDatabaseExistsAsync(context.Database.GetConnectionString()
             ?? throw new InvalidOperationException("Database connection string is missing."));
 
-        // This will block execution until the SQL Server container accepts the schema,
-        // matching the health check lifecycle setup inside your Docker Compose file.
         await context.Database.MigrateAsync();
         logger.LogInformation("Database migrations applied successfully.");
     }
     catch (Exception ex)
     {
         logger.LogError(ex, "An error occurred while migrating the database engine.");
-        throw; // Prevent application from running in a broken state
+        throw; // Don't start taking requests against a database that isn't up to date
     }
 }
 

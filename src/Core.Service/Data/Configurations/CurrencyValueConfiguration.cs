@@ -9,32 +9,28 @@ public class CurrencyValueConfiguration : IEntityTypeConfiguration<CurrencyValue
 {
     public void Configure(EntityTypeBuilder<CurrencyValue> builder)
     {
-        // Define explicit table destination
         builder.ToTable("CurrencyValues");
 
-        // Primary Key configuration
         builder.HasKey(c => c.Id);
 
-        // Limit string sizes explicitly to optimize SQL Server page storage
         builder.Property(c => c.CurrencyCode)
             .IsRequired()
             .HasMaxLength(3)
             .IsFixedLength()
-            .IsUnicode(false); // Stores as CHAR(3) instead of NVARCHAR(3) to minimize bytes
+            .IsUnicode(false); // char(3): currency codes are always 3 ASCII letters
 
-        // Enforce high-precision requirements essential for currency rates
         builder.Property(c => c.Rate)
             .IsRequired()
-            .HasPrecision(18, 6); // 6 decimal places to accurately process exchange fractions
+            .HasPrecision(18, 6); // More decimal places than the ECB publishes (e.g. 0.86045), so nothing is rounded
 
         builder.Property(c => c.RateDate)
             .IsRequired()
-            .HasColumnType("date"); // Maps to native SQL 'date' type omitting time elements
+            .HasColumnType("date");
 
         builder.Property(c => c.UpdatedAt)
             .IsRequired();
 
-        // High-performance Unique Composite Index to enforce historical data integrity
+        // One rate per currency per day. The MERGE matches on this, and the "latest rate" query reads it
         builder.HasIndex(c => new { c.CurrencyCode, c.RateDate })
             .IsUnique()
             .HasDatabaseName("UX_CurrencyValues_Code_RateDate");

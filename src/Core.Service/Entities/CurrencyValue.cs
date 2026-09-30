@@ -4,25 +4,23 @@ namespace Core.Service.Entities;
 
 public class CurrencyValue
 {
-    // EF Core Shadow Key / Primary Key
     public long Id { get; private set; }
 
-    // ISO Currency Code (e.g., "USD", "GBP", "EUR")
+    // 3-letter ISO code, stored upper case (e.g. "USD")
     public string CurrencyCode { get; private set; } = string.Empty;
 
-    // Exchange rate relative to base currency (EUR)
+    // How much one euro buys in this currency
     public decimal Rate { get; private set; }
 
-    // Timestamp when this rate was officially recorded by the ECB
+    // The ECB publication date. Date only, no time
     public DateTime RateDate { get; private set; }
 
-    // System Audit Timestamp
+    // When this row was last written (UTC)
     public DateTime UpdatedAt { get; private set; }
 
-    // Empty constructor required by EF Core materialization
+    // For EF Core
     private CurrencyValue() { }
 
-    // Domain Factory Method to safely initialize a currency entry
     public static CurrencyValue Create(string currencyCode, decimal rate, DateTime rateDate)
     {
         if (string.IsNullOrWhiteSpace(currencyCode) || currencyCode.Length != 3)
@@ -35,12 +33,11 @@ public class CurrencyValue
         {
             CurrencyCode = currencyCode.ToUpperInvariant(),
             Rate = rate,
-            RateDate = rateDate.Date, // Keep date-only accuracy
+            RateDate = rateDate.Date, // There's one rate per currency per day, so drop the time
             UpdatedAt = DateTime.UtcNow
         };
     }
 
-    // Explicit domain behavior to update an existing rate cleanly
     public void UpdateRate(decimal newRate, DateTime rateDate)
     {
         if (newRate <= 0)
