@@ -1,10 +1,10 @@
 # novi-assign
 
-Wallet management API (ASP.NET Core, .NET 10) backed by SQL Server, with ECB exchange rate synchronisation via Quartz, a Redis cache of the latest rates, and per-client rate limiting via Redis.
+A wallet management API built with ASP.NET Core on .NET 10. Wallets live in SQL Server. A Quartz job pulls exchange rates from the European Central Bank (ECB), Redis caches the latest rates, and Redis also backs per-client rate limiting.
 
 ## Assignment coverage
 
-Every task of the NoviCode assignment, where it's implemented and where it's tested:
+Where each task of the NoviCode assignment is implemented and tested:
 
 | Requirement | Implementation | Tests |
 |---|---|---|
@@ -20,16 +20,16 @@ Every task of the NoviCode assignment, where it's implemented and where it's tes
 | **Tech stack**: .NET 5+, Entity Framework, Options pattern, Quartz, xUnit | .NET 10, EF Core + SQL Server, validated options (e.g. [AddEcbGateway](src/App.Host/Infrastructure/Ecb/EcbServiceCollectionExtensions.cs)), Quartz, xUnit + NSubstitute + FluentAssertions | `EcbConfigurationTests`, `StartupValidationTests` |
 | **Patterns**: interfaces + implementations, Decorator, Factory | Ports in `Core.Service/Interfaces`; Decorators [LoggingEcbGatewayDecorator](src/Core.Service/Decorators/LoggingEcbGatewayDecorator.cs) and [FailOpenRateLimiter](src/App.Host/Infrastructure/RateLimiting/FailOpenRateLimiter.cs); Factory `BalanceStrategyFactory`; Strategy; Adapter | [LoggingEcbGatewayDecoratorTests](tests/Unit.Tests/Application/LoggingEcbGatewayDecoratorTests.cs), `BalanceStrategyTests` |
 
-Beyond the brief: [health checks](#health-checks), optional [idempotent adjustments](#idempotent-adjustments-optional), optimistic concurrency, a single [error contract](#errors), [OpenAPI + Swagger UI](#api-documentation), a [load-balanced setup](#load-balanced-setup), about 200 tests across unit, integration and functional suites, and [CI](#ci).
+On top of what the brief asked for, there are [health checks](#health-checks), optional [idempotent adjustments](#idempotent-adjustments-optional), optimistic concurrency, one [error format](#errors) for every failure, [OpenAPI and Swagger UI](#api-documentation), a [load-balanced setup](#load-balanced-setup), around 200 tests and [CI](#ci).
 
 ## Architecture
 
 ```
 src/
   Apis/Wallet.Api     Controllers, request/response models, error mapping (references Core.Service only)
-  Core.Service        Domain and application logic: entities, one handler per use case, strategies, services,
-                      EF Core + migrations,
-                      the Quartz job, and the ports (interfaces) for everything external
+  Core.Service        Domain and application logic: entities, one handler per use case, strategies,
+                      services, EF Core + migrations, the Quartz job, and the interfaces (ports)
+                      for everything external
   Ecb.Gateway         Standalone ECB feed client (references no other project)
   App.Host            Composition root: Program.cs, DI, middleware, configuration, and the adapters
                       that implement the core's ports (Redis cache, rate limiting, ECB adapter)
@@ -39,42 +39,43 @@ tests/
   Functional.Tests    The real Program.cs against real SQL Server and Redis containers
 ```
 
-Each use case has its own handler in [Core.Service/Handlers](src/Core.Service/Handlers): `CreateWalletHandler` and `AdjustBalanceHandler` (commands) change state, `GetBalanceHandler` (a query) only reads, with EF change tracking off. A handler validates its own input and returns a result record, never an entity, and the controller maps that to a response model in `Wallet.Api/Models`, so a change in the core can't silently change the HTTP contract.
+Each use case has its own handler in [Core.Service/Handlers](src/Core.Service/Handlers). `CreateWalletHandler` and `AdjustBalanceHandler` are commands and change state. `GetBalanceHandler` is a query: it only reads, and loads the wallet without EF change tracking. Every handler checks its own input and returns a plain result record rather than an entity. The controller turns that into a response model from `Wallet.Api/Models`, so changing something in the core can't quietly change the HTTP contract.
 
-Dependencies point inward: `Core.Service` depends on no web framework, Redis or HTTP client, and `Ecb.Gateway` knows nothing about this application. At runtime every replica is stateless; shared state lives in SQL Server (wallets, rates, the Quartz cluster) and Redis (rates snapshot, rate limit counters).
-
+Dependencies point inward. `Core.Service` doesn't know about ASP.NET, Redis or HTTP clients, and `Ecb.Gateway` knows nothing about this application. The replicas themselves hold no state: wallets, rates and the Quartz cluster live in SQL Server, and the rates snapshot and rate limit counters live in Redis.
 
 ## Running locally
 
-**Prerequisites:** Docker (Desktop, or Engine with Compose v2) to run the app. To run the tests you also need the [.NET 10 SDK](https://dotnet.microsoft.com/download), and Docker running for the integration and functional tests.
+You need Docker (Desktop, or Engine with Compose v2) to run the app. To run the tests you also need the [.NET 10 SDK](https://dotnet.microsoft.com/download), with Docker running for the integration and functional tests.
 
 ```bash
 cp .env.sample .env
 docker compose up -d
 ```
 
-This starts SQL Server, Redis and the API on `http://localhost:${APP_PORT}` (default `5000`). Example requests are in [tests/requests.sh](tests/requests.sh).
+This starts SQL Server, Redis and the API on `http://localhost:${APP_PORT}` (`5000` by default). [tests/requests.sh](tests/requests.sh) has example requests.
 
-The default Compose setup is a development environment: it runs the API from source with `dotnet watch` (hot reload) and connects to SQL Server as `sa`. SQL Server data is kept in the `mssql-data` volume; `docker compose down -v` wipes it. See [Production considerations](#production-considerations) for what changes in a real deployment.
+This default setup is meant for development. It runs the API from source with `dotnet watch`, so code changes reload straight away, and it connects to SQL Server as `sa`. Data is kept in the `mssql-data` volume, and `docker compose down -v` wipes it. [Production considerations](#production-considerations) covers what a real deployment does differently.
 
 ### API documentation
 
-In Development, the API publishes an [OpenAPI](https://www.openapis.org/) 3.0 document and a Swagger UI to browse and try it:
+In Development the API publishes an [OpenAPI](https://www.openapis.org/) 3.0 document, plus Swagger UI for browsing and trying it:
 
 - Swagger UI: `http://localhost:5000/swagger`
-- OpenAPI document: `http://localhost:5000/openapi/v1.json`. Share it, or generate clients from it.
+- OpenAPI document: `http://localhost:5000/openapi/v1.json`. You can share it or generate clients from it.
 
-The document is generated at runtime by ASP.NET Core's built-in `Microsoft.AspNetCore.OpenApi`, from the controllers' routes, parameters and `[ProducesResponseType]` attributes. Swagger UI (`Swashbuckle.AspNetCore.SwaggerUI`) only renders it. Both are registered in [ApiDocumentationExtensions.cs](src/App.Host/Infrastructure/ApiDocumentationExtensions.cs).
+Nothing is written by hand. ASP.NET Core's built-in `Microsoft.AspNetCore.OpenApi` generates the document at runtime from the controllers' routes, parameters and `[ProducesResponseType]` attributes, and Swagger UI (`Swashbuckle.AspNetCore.SwaggerUI`) just displays it. Both are set up in [ApiDocumentationExtensions.cs](src/App.Host/Infrastructure/ApiDocumentationExtensions.cs).
 
-- **OpenAPI 3.0, not the .NET 10 default of 3.1.** Client generators (e.g. openapi-generator for Kotlin) support 3.0 more reliably.
-- **Numbers are documented as plain numbers.** ASP.NET Core's JSON defaults also accept numbers sent as strings, so .NET generates every number as "number or string" (a type list in 3.1, `anyOf` in 3.0). Swagger UI can't fill in such a parameter and rejects every value as missing (`amount: Required field is not provided`), and generated clients would type amounts as strings. A schema transformer keeps only the number type. The API itself still accepts both.
-- **Development only.** Production doesn't publish its API surface, so the [load-balanced setup](#load-balanced-setup), which runs as `Production`, has no `/swagger`.
-- **Strategies are a dropdown.** `strategy` is the [BalanceStrategyType](src/Core.Service/Strategies/BalanceStrategyType.cs) enum, so the document lists its three names as a string `enum`. Swagger UI shows a dropdown, and generated clients get a typed enum. Names bind ignoring case (`addfundsstrategy` works). Anything else is rejected with `400 invalid_request`, including numbers such as `strategy=0`, which ASP.NET would otherwise quietly map to the first strategy.
-- **Every response must be declared.** A status code without a `[ProducesResponseType]` is missing from the contract. [OpenApiDocumentTests](tests/Integration.Tests/OpenApi/OpenApiDocumentTests.cs) checks the endpoints, the `Idempotency-Key` header, every status code of `adjustbalance` and the `ErrorResponse` schema.
+A few details worth knowing:
+
+- The document is OpenAPI 3.0 rather than .NET 10's default of 3.1, because client generators (openapi-generator for Kotlin, for example) handle 3.0 more reliably.
+- Numbers are documented as plain numbers. By default .NET describes every number as "number or string", since its JSON settings also accept numbers sent as strings. Swagger UI can't fill in a parameter like that (it rejects every value with `amount: Required field is not provided`), and generated clients would treat amounts as strings. A schema transformer keeps only the number type. The API itself still accepts both.
+- It's only published in Development. Production doesn't advertise its API, so the [load-balanced setup](#load-balanced-setup), which runs as `Production`, has no `/swagger`.
+- `strategy` shows up as a dropdown. It's the [BalanceStrategyType](src/Core.Service/Strategies/BalanceStrategyType.cs) enum, so the document lists its three names and generated clients get a typed enum. Names are matched ignoring case (`addfundsstrategy` works). Anything else gets `400 invalid_request`, including numbers like `strategy=0`, which ASP.NET would otherwise silently map to the first strategy.
+- Every status code an action can return has to be declared with `[ProducesResponseType]`, or it won't appear in the contract. [OpenApiDocumentTests](tests/Integration.Tests/OpenApi/OpenApiDocumentTests.cs) checks the endpoints, the `Idempotency-Key` header, every status code of `adjustbalance`, and the `ErrorResponse` and `BalanceResponse` schemas.
 
 ### Load-balanced setup
 
-To see the app running the way it would in production, layer [docker-compose.lb.yml](docker-compose.lb.yml) on top of the default setup:
+To run the app the way it would run in production, add [docker-compose.lb.yml](docker-compose.lb.yml) on top of the default setup:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.lb.yml up -d --build
@@ -85,23 +86,23 @@ client ──► nginx :5000 ──round-robin──► webapi replica 1 ─┐
                                     └─► webapi replica 2 ─┴─► SQL Server + Redis
 ```
 
-- **nginx** ([deploy/nginx/nginx.conf](deploy/nginx/nginx.conf)) is the only entry point, on `${APP_PORT}`. It spreads requests across the replicas, sets `X-Forwarded-For` to the connecting address (replacing anything the client sent) and adds an `X-Upstream` response header showing which replica answered.
-- **Two API replicas** run the production image from the [Dockerfile](Dockerfile): the ASP.NET runtime only, as a non-root user, in the `Production` environment. They trust `X-Forwarded-For` only from nginx's fixed address, `172.28.0.10`.
-- **SQL Server and Redis are shared** with the default setup, including data.
+- [nginx](deploy/nginx/nginx.conf) is the only way in, on `${APP_PORT}`. It spreads requests across the replicas, sets `X-Forwarded-For` to the connecting address (throwing away anything the client sent), and adds an `X-Upstream` response header so you can see which replica answered.
+- The two API replicas run the production image from the [Dockerfile](Dockerfile): just the ASP.NET runtime, running as a non-root user, in the `Production` environment. They only trust `X-Forwarded-For` from nginx's fixed address, `172.28.0.10`.
+- SQL Server and Redis, and their data, are shared with the default setup.
 
-Try it: send 12 requests and watch them alternate between replicas while the `wallet-read` limit (10 per second) still applies to the client as a whole:
+Send 12 requests and you'll see them alternate between replicas, while the `wallet-read` limit (10 per second) still applies to you as one client:
 
 ```bash
 for i in $(seq 12); do curl -s -o /dev/null -w "%{http_code} via %header{x-upstream}\n" http://localhost:5000/api/wallets/1; done
 ```
 
-The ECB sync job runs on only one replica per trigger, because Quartz uses a clustered job store.
+The ECB sync job still runs on only one replica per trigger, because Quartz uses a clustered job store.
 
-Things to know:
+Some things to be aware of:
 
-- **All local requests look like one client.** Docker Desktop hands nginx connections from its gateway (e.g. `172.28.0.1`), not your machine's real IP. That's enough to show the limit holding across replicas; the integration tests cover different clients and faked headers.
-- **The image doesn't hot reload.** It's built once, so rebuild with `--build` after code changes.
-- **Switch back to the hot-reload setup** with `docker compose up -d --remove-orphans`.
+- Locally, every request looks like it comes from the same client. Docker Desktop hands nginx connections from its gateway (e.g. `172.28.0.1`) rather than your machine's real IP. That's enough to show the limit holding across replicas, and the integration tests cover different clients and faked headers.
+- The image doesn't hot reload, since it's built once. Rebuild with `--build` after changing code.
+- To go back to the hot-reload setup, run `docker compose up -d --remove-orphans`.
 
 ## Health checks
 
@@ -114,13 +115,17 @@ Things to know:
 { "status": "Healthy", "totalDurationMs": 9, "checks": { "sql-server": { "status": "Healthy", "durationMs": 5 }, "redis": { "status": "Healthy", "durationMs": 7 } } }
 ```
 
-- **SQL Server down: `Unhealthy`, `503`.** The app can't serve wallets without it, so the load balancer should stop sending traffic.
-- **Redis down: `Degraded`, still `200`.** Rate limiting and the rates cache [fail open](#rate-limiting), so the app keeps working. Reporting Unhealthy would make the load balancer pull every replica at once over a dependency the app can do without. The status still shows the outage.
-- **Liveness never checks dependencies,** so a database outage doesn't make an orchestrator restart healthy processes in a loop.
-- **Each check has a timeout** (`HealthChecks:Timeout`, 5 seconds by default; keep it below the probe's timeout). The SQL check opens its own connection rather than going through EF Core, whose retry strategy would hold a probe for seconds during an outage.
-- **Safe to expose.** The response contains only statuses and durations, never error messages or connection details; failures are logged instead. Responses are never cached, and successful probes are kept out of the request log so it isn't flooded.
+If SQL Server is down, `/health` reports `Unhealthy` with a `503`. The app can't serve wallets without the database, so the load balancer should stop sending it traffic.
 
-Code: [DependencyHealthCheckExtensions](src/App.Host/Infrastructure/HealthChecks/DependencyHealthCheckExtensions.cs). Tests: `DependencyHealthCheckTests` (outages, against real Redis) and the functional `HealthCheckTests` (the real app).
+If Redis is down, it reports `Degraded` but still returns `200`. Rate limiting and the rates cache [keep working without Redis](#rate-limiting), so the app is still usable. Reporting Unhealthy would make the load balancer pull every replica at once over something the app can live without. The status still shows the outage.
+
+The liveness endpoint never checks dependencies, so a database outage doesn't make the orchestrator restart perfectly healthy processes over and over.
+
+Each check has a timeout (`HealthChecks:Timeout`, 5 seconds by default, which should stay below the probe's own timeout). The SQL check opens its own connection instead of going through EF Core, because EF's retry logic would hold a probe for several seconds during an outage.
+
+The endpoints are safe to expose. The response only contains statuses and durations, never error messages or connection details, and failures are logged instead. Responses are never cached, and successful probes are left out of the request log so they don't flood it.
+
+The code is in [DependencyHealthCheckExtensions](src/App.Host/Infrastructure/HealthChecks/DependencyHealthCheckExtensions.cs). `DependencyHealthCheckTests` covers outages against real Redis, and the functional `HealthCheckTests` run against the real app.
 
 ## Errors
 
@@ -130,14 +135,14 @@ Every error the API returns has the same JSON body:
 { "error": "Wallet lacks sufficient funds to complete this operation.", "code": "insufficient_funds" }
 ```
 
-`code` is stable, so clients should branch on it. `error` is a human-readable message and may change.
+`code` never changes, so that's what clients should check. `error` is a message for people to read and may be reworded.
 
 | Status | `code` | When |
 |---|---|---|
 | 400 | `invalid_request` | Invalid input: a missing or unparsable parameter, malformed JSON, an unknown strategy, non-positive amount, a blank or too long `Idempotency-Key`, bad currency code, negative initial balance, an amount in another currency that converts to less than 0.0001 of the wallet's currency |
 | 400 | `unsupported_currency` | No exchange rate is known for the requested conversion or adjustment currency |
 | 404 | `wallet_not_found` | The wallet doesn't exist |
-| 409 | `concurrency_conflict` | Another request changed the wallet at the same time. Nothing was applied: retry the request (with the same `Idempotency-Key`, if you sent one) |
+| 409 | `concurrency_conflict` | Another request changed the wallet at the same time. Nothing was applied, so retry the request (with the same `Idempotency-Key`, if you sent one) |
 | 422 | `insufficient_funds` | `SubtractFundsStrategy` would take the balance below zero |
 | 422 | `idempotency_key_reused` | The `Idempotency-Key` was already used for a different request |
 | 429 | `rate_limited` | Rate limit exceeded; see [Rate limiting](#rate-limiting) |
@@ -145,36 +150,45 @@ Every error the API returns has the same JSON body:
 
 ### How it works
 
-- **One place maps exceptions to responses.** [ApiExceptionFilter](src/Apis/Wallet.Api/Filters/ApiExceptionFilter.cs) is applied to `WalletController`, so the actions only handle the success path. `Core.Service` throws domain exceptions ([Core.Service/Exceptions](src/Core.Service/Exceptions)) and knows nothing about HTTP.
-- **Only expected failures are 4xx.** Anything not in the table, such as a SQL Server outage or a bug, is a `500` with a generic message. Clients aren't told it's their fault, monitoring sees a server error, and internal details (e.g. SQL error text) never reach the response. The exception is logged as `Unhandled exception while processing {Method} {Path}`.
-- **A global safety net covers the rest of the pipeline.** Exceptions thrown outside the controllers (middleware, routing, response writers) never reach `ApiExceptionFilter`. Two `IExceptionHandler`s behind `UseExceptionHandler()`, the outermost middleware, return the same body. They're tried in order: [HttpExceptionHandler](src/App.Host/Infrastructure/Errors/HttpExceptionHandler.cs) keeps the original `4xx` (as `invalid_request`) when the server itself rejected the request, e.g. a body over the size limit; [GenericExceptionHandler](src/App.Host/Infrastructure/Errors/GenericExceptionHandler.cs) turns everything else into a logged, generic `500`. Development keeps ASP.NET Core's detailed developer exception page instead.
-- **Client errors have their own exception type.** Input the client got wrong throws `DomainValidationException`. `ArgumentException` stays for guard clauses that catch programming errors, and those are `500`s.
-- **Cancelled requests aren't errors.** If the client disconnects, the filter doesn't log an error or write a response.
-- **Malformed requests use the same body.** ASP.NET Core rejects a missing required parameter, an unparsable value or malformed JSON before the action runs. `AddWalletApi` ([WalletApiServiceCollectionExtensions.cs](src/Apis/Wallet.Api/WalletApiServiceCollectionExtensions.cs)) replaces the default problem details with the same `ErrorResponse` (`invalid_request`), prefixing each message with the parameter name (e.g. `strategy: The value 'Transfer' is not valid.`). Clients handle one error shape.
+Exceptions are turned into responses in one place. [ApiExceptionFilter](src/Apis/Wallet.Api/Filters/ApiExceptionFilter.cs) is applied to `WalletController`, so the actions only deal with the success case. `Core.Service` throws its own exceptions ([Core.Service/Exceptions](src/Core.Service/Exceptions)) and knows nothing about HTTP status codes.
 
-To add an error: create an exception in `Core.Service/Exceptions`, throw it from the domain code, add a code to [ErrorCodes](src/Apis/Wallet.Api/Models/ErrorResponse.cs), map it in `ApiExceptionFilter`, add a case to [ErrorResponseTests](tests/Integration.Tests/ErrorHandling/ErrorResponseTests.cs), and cover it end to end in [Functional.Tests](tests/Functional.Tests).
+Only expected failures become 4xx responses. Anything not in the table, like a SQL Server outage or a bug, is a `500` with a generic message. That way clients aren't told it's their fault, monitoring sees a server error, and internal details such as SQL error text never end up in a response. The exception is logged as `Unhandled exception while processing {Method} {Path}`.
+
+Some exceptions happen outside the controllers (in middleware, routing or while writing the response) and never reach the filter. For those, `UseExceptionHandler()` is the outermost middleware and tries two handlers in order. [HttpExceptionHandler](src/App.Host/Infrastructure/Errors/HttpExceptionHandler.cs) keeps the original `4xx` (as `invalid_request`) when the server itself rejected the request, for example a body over the size limit. [GenericExceptionHandler](src/App.Host/Infrastructure/Errors/GenericExceptionHandler.cs) turns everything else into a logged, generic `500`. Both return the same body. In Development you get ASP.NET Core's detailed error page instead.
+
+Client mistakes have their own exception type, `DomainValidationException`. `ArgumentException` is kept for guard clauses that catch programming errors, and those are `500`s.
+
+If the client disconnects, the request was cancelled rather than failed, so the filter doesn't log an error or write a response.
+
+Requests that ASP.NET Core rejects before the action runs (a missing required parameter, a value it can't parse, broken JSON) use the same body too. `AddWalletApi` ([WalletApiServiceCollectionExtensions.cs](src/Apis/Wallet.Api/WalletApiServiceCollectionExtensions.cs)) swaps the default problem details for an `ErrorResponse` with `invalid_request`, and puts the parameter name in front of each message (e.g. `strategy: The value 'Transfer' is not valid.`). Clients only ever have to handle one error format.
+
+To add a new error, create an exception in `Core.Service/Exceptions` and throw it from the domain code, add a code to [ErrorCodes](src/Apis/Wallet.Api/Models/ErrorResponse.cs), map it in `ApiExceptionFilter`, add a case to [ErrorResponseTests](tests/Integration.Tests/ErrorHandling/ErrorResponseTests.cs), and cover it end to end in [Functional.Tests](tests/Functional.Tests).
 
 ## Rate limiting
 
-Each client IP can make a limited number of requests per time window to each endpoint. Requests over the limit are rejected with `429 Too Many Requests`, a `Retry-After` header (seconds) and a JSON body:
+Each client IP gets a limited number of requests per time window on each endpoint. Once over the limit, requests get `429 Too Many Requests` with a `Retry-After` header (in seconds) and this body:
 
 ```json
 { "error": "Too many requests. Please retry later.", "code": "rate_limited" }
 ```
 
-To see every limit in action against a running stack, run `tests/rate-limit.sh` (optionally passing a base URL; the default is `http://localhost:5000`).
+To try every limit against a running stack, run `tests/rate-limit.sh`. You can pass it a base URL; the default is `http://localhost:5000`.
 
 ### How it works
 
-- **Built-in ASP.NET Core rate limiting middleware** (`AddRateLimiter` / `[EnableRateLimiting]`), with counters stored in Redis through [RedisRateLimiting](https://github.com/cristipufu/aspnetcore-redis-rate-limiting). With in-memory counters, every node behind a load balancer would give each client its own separate allowance; Redis makes the limit hold across all nodes.
-- **Fixed window algorithm.** A window starts with a client's first request and resets once it expires. It uses constant memory per client and gives an exact `Retry-After`. The trade-off: a client can send up to twice the limit in a short burst across a window boundary.
-- **No race conditions.** Each check-and-increment runs as a single atomic Lua script in Redis, so concurrent requests, even on different nodes, cannot exceed the limit.
-- **One budget per client IP per endpoint.** Endpoints are identified by HTTP method and route pattern, so `/api/wallets/1` and `/api/wallets/2` share the same budget. IPv6 clients are limited per `/64` block, since one subscriber usually owns a whole block and could otherwise rotate addresses.
-- **Fails open.** If Redis is unreachable, requests are allowed through and a warning is logged, rather than every request failing with a 500. Redis commands fail immediately while disconnected, so an outage adds no latency.
+It uses ASP.NET Core's built-in rate limiting middleware (`AddRateLimiter` and `[EnableRateLimiting]`), with the counters kept in Redis through [RedisRateLimiting](https://github.com/cristipufu/aspnetcore-redis-rate-limiting). With in-memory counters, each node behind the load balancer would give every client its own separate allowance. Keeping them in Redis means the limit holds across all nodes.
+
+The algorithm is a fixed window. A window starts with the client's first request and resets when it expires. It needs very little memory per client and gives an exact `Retry-After`. The downside is that a client can squeeze in up to twice the limit in a short burst around the moment one window ends and the next begins.
+
+Concurrent requests can't slip past the limit, even on different nodes, because each check-and-increment runs as one atomic Lua script inside Redis.
+
+Budgets are per client IP and per endpoint. An endpoint is its HTTP method plus route template, so `/api/wallets/1` and `/api/wallets/2` share a budget. IPv6 clients are grouped by `/64` block, since one subscriber usually owns a whole block and could otherwise just rotate addresses.
+
+If Redis can't be reached, requests are let through and a warning is logged, rather than every request failing with a 500. While disconnected, Redis commands fail immediately, so an outage doesn't slow requests down.
 
 ### Policies
 
-Each endpoint opts into a named policy with `[EnableRateLimiting]`. Policy names are defined in [RateLimitPolicies.cs](src/Apis/Wallet.Api/RateLimitPolicies.cs) and their limits in `appsettings.json`:
+Each endpoint picks a named policy with `[EnableRateLimiting]`. The names are in [RateLimitPolicies.cs](src/Apis/Wallet.Api/RateLimitPolicies.cs) and the limits in `appsettings.json`:
 
 | Policy | Endpoint | Default limit |
 |---|---|---|
@@ -192,14 +206,13 @@ Each endpoint opts into a named policy with `[EnableRateLimiting]`. Policy names
 }
 ```
 
-- `Window` is a `TimeSpan` with one-second resolution; the minimum is `00:00:01`. Because the Redis window is tracked in whole seconds, a window can last up to one second longer than configured. The limit is then slightly stricter, never looser.
-- The app refuses to start if a policy in `RateLimitPolicies.All` has no valid configuration.
+`Window` is a `TimeSpan` with a minimum of one second (`00:00:01`). Redis tracks windows in whole seconds, so a window can run up to a second longer than configured. That makes the limit slightly stricter, never looser. The app won't start if any policy listed in `RateLimitPolicies.All` is missing or has invalid settings.
 
-To add a policy: add a constant to `RateLimitPolicies` and list it in `All`, configure it under `RateLimiting:Policies`, and put `[EnableRateLimiting(RateLimitPolicies.YourPolicy)]` on the endpoint.
+To add a policy, add a constant to `RateLimitPolicies` and list it in `All`, configure it under `RateLimiting:Policies`, and put `[EnableRateLimiting(RateLimitPolicies.YourPolicy)]` on the endpoint.
 
 ### Client IP behind a load balancer
 
-The real client IP is read from `X-Forwarded-For`, **but only when the request comes from a trusted proxy**. If the app trusted the header from anyone, a client could fake it to get past the limit. Only loopback is trusted by default, so before deploying behind a load balancer, list its addresses:
+The client's real IP is read from `X-Forwarded-For`, but only when the request comes from a proxy the app trusts. If it trusted the header from anyone, a client could fake it and dodge the limit. By default only loopback is trusted, so list your load balancer's addresses before deploying behind one:
 
 ```json
 "ForwardedHeaders": {
@@ -209,41 +222,45 @@ The real client IP is read from `X-Forwarded-For`, **but only when the request c
 }
 ```
 
-- `KnownProxies` takes single addresses and `KnownNetworks` takes CIDR ranges.
-- `ForwardLimit` is the number of proxy hops in front of the app.
-- Until the load balancer is listed, the app sees the load balancer's IP, so all clients share one budget.
-- The app refuses to start if an entry isn't a valid address or CIDR range, or `ForwardLimit` is below 1.
+`KnownProxies` takes single addresses and `KnownNetworks` takes CIDR ranges. `ForwardLimit` is the number of proxy hops in front of the app. Until the load balancer is listed, the app sees every request as coming from the load balancer, so all clients share one budget. The app won't start if an entry isn't a valid address or CIDR range, or if `ForwardLimit` is below 1.
 
 ### Redis
 
-The Redis connection string is `ConnectionStrings:Redis`, set to `redis:6379` in Docker Compose. One shared `IConnectionMultiplexer` is registered in [RedisServiceCollectionExtensions.cs](src/App.Host/Infrastructure/RedisServiceCollectionExtensions.cs). Rate limiting and the [currency rates cache](#currency-rates-cache) both use it, and any new Redis feature should too, rather than open a second connection.
+The connection string is `ConnectionStrings:Redis`, which Docker Compose sets to `redis:6379`. A single shared `IConnectionMultiplexer` is registered in [RedisServiceCollectionExtensions.cs](src/App.Host/Infrastructure/RedisServiceCollectionExtensions.cs). Rate limiting and the [currency rates cache](#currency-rates-cache) both use it, and any new Redis feature should use it too instead of opening its own connection.
 
 ## ECB rate sync
 
-[EcbSyncJob](src/Core.Service/Jobs/EcbSyncJob.cs) runs on startup and then every minute by default (Quartz, on one node per trigger). It fetches the daily ECB feed through the [Ecb.Gateway](src/Ecb.Gateway/EcbClient.cs) library, saves the rates to SQL Server, then refreshes the [currency rates cache](#currency-rates-cache).
+[EcbSyncJob](src/Core.Service/Jobs/EcbSyncJob.cs) runs at startup and then every minute by default, on one node per trigger. It fetches the ECB daily feed through the [Ecb.Gateway](src/Ecb.Gateway/EcbClient.cs) library, saves the rates to SQL Server, and then refreshes the [currency rates cache](#currency-rates-cache).
 
 ```
 ECB feed ──► EcbClient (Ecb.Gateway: EcbDailyRates) ──► EcbGatewayAdapter (+ EUR, EcbRateResult) ──► LoggingEcbGatewayDecorator ──► EcbRatesService (validate, de-duplicate) ──► one MERGE ──► CurrencyValues
 ```
 
-**The gateway is a standalone library.** `Ecb.Gateway` references no other project. It exposes `IEcbClient`, which returns the feed as typed objects (`EcbDailyRates`: the publication date and each `EcbRate`), so any application could use it. The core doesn't depend on it either: `Core.Service` defines the `IEcbGateway` port it needs, and [EcbGatewayAdapter](src/App.Host/Infrastructure/Ecb/EcbGatewayAdapter.cs) in the host connects the two. The adapter also adds EUR at 1, because every ECB rate is quoted against the euro and the feed doesn't list EUR itself.
+The gateway is a standalone library that references no other project. It exposes `IEcbClient`, which returns the feed as typed objects (`EcbDailyRates`, holding the publication date and each `EcbRate`), so any application could reuse it. The core doesn't depend on it either. `Core.Service` defines the `IEcbGateway` interface it needs, and [EcbGatewayAdapter](src/App.Host/Infrastructure/Ecb/EcbGatewayAdapter.cs) in the host connects the two. The adapter also adds EUR with a rate of 1: every ECB rate is quoted against the euro, and the feed doesn't list EUR itself.
 
-`CurrencyValues` keeps **one row per currency per date**, so it holds the full history of rates. A new day adds rows; the same day again updates them.
+`CurrencyValues` keeps one row per currency per date, so it holds the full rate history. A new day adds rows, and the same day again updates them.
 
 ### How it works
 
-- **One raw SQL `MERGE` per sync.** [CurrencyValueRepository.MergeRatesAsync](src/Core.Service/Repositories/CurrencyValueRepository.cs) sends the whole feed in a single `MERGE INTO CurrencyValues` statement, matching on the unique `(CurrencyCode, RateDate)` index:
-  - a date with no row for that currency is **inserted**;
-  - a row whose rate changed is **updated** (rate and `UpdatedAt`);
-  - an unchanged rate matches no `WHEN` clause, so the row isn't rewritten.
+Each sync is a single raw SQL `MERGE`. [CurrencyValueRepository.MergeRatesAsync](src/Core.Service/Repositories/CurrencyValueRepository.cs) sends the whole feed in one `MERGE INTO CurrencyValues` statement, matching on the unique `(CurrencyCode, RateDate)` index:
 
-  One statement means one round trip and one transaction: all rates are saved, or none are. `OUTPUT $action` returns what happened to each row, which feeds the `Inserted` / `Updated` counts in the job's log line.
-- **Parameters only.** The SQL text contains nothing but generated parameter names (`@c0, @r0, @d0, @u0, ...`). Every value is sent as a typed parameter matching its column (`char(3)`, `decimal(18,6)`, `date`, `datetime2`), so feed data can never change the statement and no precision is lost.
-- **`WITH (HOLDLOCK)`** keeps the matched key range locked until the insert. Two merges running at the same time (e.g. a manual run during a scheduled one) can't both insert the same currency and date and fail on the unique index.
-- **The feed is cleaned first.** `EcbRatesService` validates every rate through `CurrencyValue.Create` (a 3-letter code, a positive rate, the date only) and keeps one entry per currency and date. A `MERGE` fails if its source matches the same row twice. An invalid rate fails the whole sync before anything is written, and the job retries on its next run.
-- **Limit:** SQL Server allows 2100 parameters per statement and each rate uses 4, so one merge takes at most 500 rates (`MaxRatesPerMerge`). The daily feed has about 30.
-- **Safe to retry.** Running the same merge again changes nothing, so EF's retry on transient SQL errors can safely repeat it.
-- **Every feed call is timed and logged by a decorator.** [LoggingEcbGatewayDecorator](src/Core.Service/Decorators/LoggingEcbGatewayDecorator.cs) wraps the `IEcbGateway` port and logs `Fetched 30 rates from the ECB feed for 2026-09-29 in 231 ms`, or a warning with the elapsed time and the exception when the feed fails. It passes results and exceptions through unchanged, so neither the adapter nor the job knows it's there. It's added with the built-in container: `AddEcbGateway` registers the adapter as itself, and `IEcbGateway` resolves to the decorator wrapping it. `FailOpenRateLimiter` uses the same pattern around the Redis rate limiter.
+- a currency with no row for that date is inserted;
+- a row whose rate changed is updated (the rate and `UpdatedAt`);
+- a row whose rate is the same doesn't match any `WHEN` clause, so it isn't rewritten.
+
+One statement means one round trip and one transaction, so either all rates are saved or none are. `OUTPUT $action` reports what happened to each row, which gives the `Inserted` and `Updated` counts in the job's log line.
+
+Values only ever go in as parameters. The SQL text contains nothing but generated parameter names (`@c0, @r0, @d0, @u0, ...`), and each value is sent as a typed parameter matching its column (`char(3)`, `decimal(18,6)`, `date`, `datetime2`). Feed data can't change the statement, and no precision is lost.
+
+`WITH (HOLDLOCK)` keeps the matched key range locked until the insert happens. Without it, two merges running at once (say, a manual run during a scheduled one) could both try to insert the same currency and date, and one would fail on the unique index.
+
+The feed is cleaned up before the merge. `EcbRatesService` validates every rate through `CurrencyValue.Create` (a 3-letter code, a positive rate, a date with no time) and keeps one entry per currency and date, because a `MERGE` fails if two source rows match the same target row. One invalid rate fails the whole sync before anything is written, and the job tries again on its next run.
+
+SQL Server allows 2100 parameters per statement and each rate uses 4, so one merge can take at most 500 rates (`MaxRatesPerMerge`). The daily feed has about 30.
+
+Running the same merge twice changes nothing, so it's safe for EF's retry on transient SQL errors to repeat it.
+
+Every call to the feed is timed and logged by a decorator. [LoggingEcbGatewayDecorator](src/Core.Service/Decorators/LoggingEcbGatewayDecorator.cs) wraps `IEcbGateway` and logs something like `Fetched 30 rates from the ECB feed for 2026-09-29 in 231 ms`, or a warning with the elapsed time and the exception if the call fails. It passes results and exceptions through untouched, so neither the adapter nor the job knows it's there. It's wired up with the built-in container: `AddEcbGateway` registers the adapter as itself, and `IEcbGateway` resolves to the decorator wrapped around it. `FailOpenRateLimiter` wraps the Redis rate limiter the same way.
 
 ### Configuration
 
@@ -259,45 +276,47 @@ The feed URL, the HTTP timeout and the job interval come from `appsettings.json`
 }
 ```
 
-- `Ecb` binds to the gateway library's `EcbClientOptions`, registered by [AddEcbGateway](src/App.Host/Infrastructure/Ecb/EcbServiceCollectionExtensions.cs). `Timeout` applies to each request to the feed.
-- `EcbSync:Interval` sets the Quartz trigger, registered by [AddEcbSyncJob](src/App.Host/Infrastructure/Jobs/EcbSyncServiceCollectionExtensions.cs). The trigger is stored in the clustered job store, and Quartz overwrites it on startup, so a new interval takes effect when the nodes restart. Keep `CurrencyRatesCache:TimeToLive` longer than the interval.
-- Like every setting, each can be overridden per environment, e.g. `EcbSync__Interval=00:05:00`.
-- The app refuses to start if the URL isn't an absolute http(s) URL, or the timeout or the interval is missing or not positive.
+`Ecb` binds to the gateway library's `EcbClientOptions`, registered by [AddEcbGateway](src/App.Host/Infrastructure/Ecb/EcbServiceCollectionExtensions.cs). `Timeout` applies to each request to the feed.
+
+`EcbSync:Interval` sets the Quartz trigger, registered by [AddEcbSyncJob](src/App.Host/Infrastructure/Jobs/EcbSyncServiceCollectionExtensions.cs). The trigger lives in the clustered job store and Quartz overwrites it on startup, so a new interval takes effect once the nodes restart. Keep `CurrencyRatesCache:TimeToLive` longer than the interval.
+
+Like any setting, these can be overridden per environment, e.g. `EcbSync__Interval=00:05:00`. The app won't start if the URL isn't an absolute http(s) URL, or if the timeout or interval is missing or not positive.
 
 ## Idempotent adjustments (optional)
 
-`POST /api/wallets/{walletId}/adjustbalance?amount=&currency=&strategy=` works exactly as the assignment specifies, with no extra header. Each request applies its adjustment, so two identical requests apply twice, as with any plain `POST`.
+`POST /api/wallets/{walletId}/adjustbalance?amount=&currency=&strategy=` works exactly as the assignment describes, with no extra header. Every request applies its adjustment, so sending the same request twice applies it twice, like any plain `POST`.
 
-To make retries safe (e.g. after a timeout, when the client can't tell whether the first attempt went through), send an optional `Idempotency-Key` header with a unique value such as a UUID:
+Retries can be made safe by sending an `Idempotency-Key` header with a unique value such as a UUID. That's useful after a timeout, when the client can't tell whether the first attempt went through:
 
 ```bash
 curl -sS -i -X POST 'http://localhost:5000/api/wallets/1/adjustbalance?amount=5&currency=EUR&strategy=AddFundsStrategy' -H "Idempotency-Key: $(uuidgen)"
 ```
 
-- **The first request with a key applies the adjustment and stores its result**, in the same transaction as the balance change.
-- **A retry with the same key and the same parameters** isn't applied again. It returns the stored result with an `Idempotent-Replayed: true` header, even when the retries arrive in parallel.
-- **The same key with different parameters** is rejected with `422 idempotency_key_reused`.
-- **A key that is sent must be usable:** 1-100 characters and not blank, otherwise `400 invalid_request`. An empty header counts as no key.
+The first request with a key applies the adjustment and stores the result, in the same transaction as the balance change. A retry with the same key and the same parameters isn't applied again. It gets the stored result back with an `Idempotent-Replayed: true` header, even if several retries arrive at the same time. Using the same key with different parameters is rejected with `422 idempotency_key_reused`.
 
-Without a key, concurrent adjustments are still safe: the wallet's row version makes a conflicting update fail with `409 concurrency_conflict` instead of losing an update.
+A key that is sent has to be 1-100 characters and not blank, otherwise the request gets `400 invalid_request`. An empty header counts as no key.
+
+Concurrent adjustments are safe without a key too. The wallet's row version makes a conflicting update fail with `409 concurrency_conflict` instead of silently losing an update.
 
 ## Adjustments in another currency
 
-A balance adjustment can be made in any currency with a known exchange rate, not only the wallet's own. For example, `amount=50&currency=USD` on a EUR wallet converts the 50 USD to EUR and then applies the strategy:
+An adjustment can be made in any currency with a known exchange rate, not just the wallet's own. For example, `amount=50&currency=USD` on a EUR wallet converts the 50 USD to EUR and then applies the strategy:
 
 ```bash
 curl -sS -X POST 'http://localhost:5000/api/wallets/1/adjustbalance?amount=50&currency=USD&strategy=AddFundsStrategy'
 ```
 
-- **Converted with the latest ECB rates**, through EUR (`amount / rate(from) * rate(to)`) and rounded to 4 decimal places, the precision balances are stored with. Balance conversion on `GET` uses the same [CurrencyConverter](src/Core.Service/Services/CurrencyConverter.cs), so the two never disagree. The rates come from the [currency rates cache](#currency-rates-cache).
-- **Balance rules apply to the converted amount.** `SubtractFundsStrategy` compares the converted amount with the balance, so it rejects anything that would take the wallet below zero in its own currency (`422 insufficient_funds`).
-- **The response is in the wallet's currency.** It returns the wallet's new balance, as for any adjustment.
-- **Failures leave the balance unchanged:** a currency without a rate is rejected with `400 unsupported_currency`, and an amount that converts to less than 0.0001 of the wallet's currency with `400 invalid_request`.
-- **Retries replay the original result.** An adjustment retried with the same `Idempotency-Key` returns the balance from the first attempt, even if the rates changed in between. It is never converted again.
+The amount is converted at the latest ECB rates, through EUR (`amount / rate(from) * rate(to)`), and rounded to 4 decimal places, which is the precision balances are stored with. The balance conversion on `GET` uses the same [CurrencyConverter](src/Core.Service/Services/CurrencyConverter.cs), so the two can never disagree. Rates come from the [currency rates cache](#currency-rates-cache).
+
+Balance rules apply to the converted amount. `SubtractFundsStrategy` compares it with the balance, so it refuses anything that would take the wallet below zero in its own currency (`422 insufficient_funds`). The response always shows the wallet's new balance in the wallet's currency.
+
+When something goes wrong the balance stays as it was. A currency without a rate gets `400 unsupported_currency`, and an amount that converts to less than 0.0001 of the wallet's currency gets `400 invalid_request`.
+
+A retry with the same `Idempotency-Key` returns the balance from the first attempt, even if the rates have changed since. It's never converted a second time.
 
 ## Currency rates cache
 
-Currency conversion (`GET /api/wallets/{walletId}?currency=USD`, and adjustments in another currency) reads exchange rates from Redis, not from SQL Server. The database is only queried when the cache is empty or unreachable.
+Currency conversion (`GET /api/wallets/{walletId}?currency=USD`, and adjustments in another currency) reads exchange rates from Redis, not SQL Server. The database is only queried when the cache is empty or can't be reached.
 
 ```
 EcbSyncJob (every EcbSync:Interval, one node) ──► SQL Server ──► latest rate per currency ──► Redis (replace snapshot)
@@ -307,12 +326,17 @@ GET /api/wallets/{id}?currency=X ──► Redis ──hit──► convert
 
 ### How it works
 
-- **One shared snapshot in Redis, not an in-process cache.** The sync job runs on only one node per trigger, so an in-memory cache would be refreshed on that node and stay stale on every other one. Redis gives all nodes the same rates as soon as the job finishes.
-- **The snapshot is a single hash** at `currency-rates:latest:v1`, mapping each currency code to its latest rate against EUR. Reading it is one `HGETALL` of about 30 small fields. The `v1` suffix lets a future format change roll out without old and new nodes misreading each other's data.
-- **The job refreshes the cache on every run**, right after saving rates to SQL Server, even when no rate changed. The snapshot is rebuilt from the database (the latest rate for each currency), not from the ECB payload, so the cache always matches the database. It is replaced atomically in one `MULTI/EXEC` transaction: readers never see a half-written snapshot, and currencies no longer in the database are dropped. Because every run rewrites it, the cache recovers within one job interval after a Redis restart, eviction or outage.
-- **Cache misses read through, without a race.** On a miss (for example at first startup, before the job has run), the request reads the rates from SQL Server and writes them to Redis **only if the key still doesn't exist** (a `WATCH`-based transaction). If the job writes a fresher snapshot while a request is still reading the database, the request's older data is discarded instead of overwriting it.
-- **Unknown currencies never reach the database.** The snapshot holds every currency, so a currency missing from it has no rate, and the request fails with `400` (`unsupported_currency`) without a database query.
-- **Fails open.** If Redis is unreachable, requests read rates from SQL Server and a warning is logged (`Currency rates cache is unavailable`), rather than failing. As with rate limiting, Redis commands fail immediately while disconnected, so an outage adds no latency.
+The rates are one shared snapshot in Redis rather than an in-process cache. The sync job only runs on one node per trigger, so an in-memory cache would get refreshed on that node and go stale everywhere else. With Redis, every node sees the new rates as soon as the job finishes.
+
+The snapshot is a single hash at `currency-rates:latest:v1`, mapping each currency code to its latest rate against EUR. Reading it is one `HGETALL` of about 30 small fields. The `v1` in the key means a future format change can be rolled out without old and new nodes misreading each other's data.
+
+The job refreshes the cache on every run, straight after saving to SQL Server, even if no rate changed. The snapshot is rebuilt from the database (the latest rate per currency) rather than from the ECB response, so the cache always matches the database. It's swapped in one `MULTI/EXEC` transaction, so readers never see a half-written snapshot, and currencies that are no longer in the database drop out. Since every run rewrites it, the cache recovers within one job interval after a Redis restart, eviction or outage.
+
+On a cache miss (for example at first startup, before the job has run), the request reads the rates from SQL Server and writes them to Redis only if the key still doesn't exist, using a `WATCH`-based transaction. If the job writes a fresher snapshot while the request is still reading the database, the request's older data is thrown away instead of overwriting the new one.
+
+A currency that isn't in the snapshot has no rate, since the snapshot holds every currency. The request fails with `400 unsupported_currency` without touching the database.
+
+If Redis can't be reached, requests read the rates from SQL Server and log a warning (`Currency rates cache is unavailable`) instead of failing. As with rate limiting, Redis commands fail immediately while disconnected, so an outage doesn't add latency.
 
 ### Configuration
 
@@ -322,13 +346,12 @@ GET /api/wallets/{id}?currency=X ──► Redis ──hit──► convert
 }
 ```
 
-- `TimeToLive` is only a safety net, since the job rewrites the snapshot on every run (every minute by default). It makes sure the key never lives forever, and that Redis can evict it under a `volatile-*` `maxmemory` policy. Keep it longer than the job interval, or requests will fall back to the database between runs.
-- The app refuses to start if `TimeToLive` is missing or not positive.
+`TimeToLive` is just a safety net, because the job rewrites the snapshot on every run (every minute by default). It stops the key from living forever and lets Redis evict it under a `volatile-*` `maxmemory` policy. Keep it longer than the job interval, or requests will fall back to the database between runs. The app won't start if it's missing or not positive.
 
 ### Code
 
-- [ICurrencyRatesProvider](src/Core.Service/Interfaces/ICurrencyRatesProvider.cs) / [CurrencyRatesProvider](src/Core.Service/Services/CurrencyRatesProvider.cs): the cache-aside read path used by `GetBalanceHandler` and `AdjustBalanceHandler`, and the refresh used by `EcbSyncJob`.
-- [ICurrencyRatesCache](src/Core.Service/Interfaces/ICurrencyRatesCache.cs): the cache abstraction, which keeps `Core.Service` free of Redis dependencies.
+- [ICurrencyRatesProvider](src/Core.Service/Interfaces/ICurrencyRatesProvider.cs) / [CurrencyRatesProvider](src/Core.Service/Services/CurrencyRatesProvider.cs): the read path (cache first, then the database) used by `GetBalanceHandler` and `AdjustBalanceHandler`, and the refresh used by `EcbSyncJob`.
+- [ICurrencyRatesCache](src/Core.Service/Interfaces/ICurrencyRatesCache.cs): the cache interface, which keeps Redis out of `Core.Service`.
 - [RedisCurrencyRatesCache](src/App.Host/Infrastructure/Caching/RedisCurrencyRatesCache.cs): the Redis implementation, registered by `AddCurrencyRatesCache`.
 
 ## Tests
@@ -340,10 +363,10 @@ dotnet test tests/Unit.Tests               # unit tests only: no Docker, well un
 
 ### CI
 
-[GitHub Actions](.github/workflows/ci.yml) runs on every pull request to `master` and every push to `master`, with two jobs in parallel:
+[GitHub Actions](.github/workflows/ci.yml) runs on every pull request to `master` and every push to `master`, with two jobs side by side:
 
-- **Build and test** builds in Release (warnings are errors, so the analysers and code style are enforced too) and runs all three test projects. The integration and functional tests start Redis and SQL Server with Testcontainers, using the runner's Docker. The run page shows a coverage summary (line and branch coverage per assembly, excluding test projects and EF migrations). It's informational: there's no minimum. If tests fail, the TRX results and coverage files are attached to the run as the `test-results` artifact.
-- **Docker image** builds the production [Dockerfile](Dockerfile) without pushing it, so a broken image (e.g. a new project missing from the restore layer) fails the PR.
+- **Build and test** builds in Release, where warnings are errors, so the analysers and code style are enforced as well. Then it runs all three test projects, with Testcontainers starting Redis and SQL Server on the runner's Docker. The run page shows a coverage summary (line and branch coverage per assembly, leaving out test projects and EF migrations). It's for information only; there's no minimum. If tests fail, the TRX results and coverage files are attached to the run as the `test-results` artifact.
+- **Docker image** builds the production [Dockerfile](Dockerfile) without pushing it, so a broken image (a new project missing from the restore layer, say) fails the PR.
 
 A new push to the same PR cancels the run it replaces. To make the checks mandatory, require both jobs in a branch protection rule for `master`.
 
@@ -358,102 +381,129 @@ The tests follow the layers of the code, and each layer is tested with the light
 
 ### Unit tests
 
-- **Domain:** wallet creation and credit/debit/force-debit rules, currency rate validation, each balance strategy, and strategy lookup, including which domain exception each rule throws (see [Errors](#errors)).
-- **Application:**
-  - what the ECB sync hands to the merge (the whole feed in one call, normalised, de-duplicated, invalid rates rejected, empty feed skipped);
-  - conversion maths through EUR, including rounding, in `CurrencyConverter`;
-  - handler input validation, and each strategy applied through the real factory by `AdjustBalanceHandler`;
-  - cache-aside reads;
-  - the job refreshing the cache only after a successful sync.
-- Names follow `Method_Scenario_Result`.
+The domain tests cover wallet creation and the credit, debit and force-debit rules, currency rate validation, each balance strategy and the strategy lookup, including which exception each rule throws (see [Errors](#errors)).
+
+The application tests cover:
+
+- what the ECB sync passes to the merge (the whole feed in one call, normalised and de-duplicated, with invalid rates rejected and an empty feed skipped);
+- conversion maths through EUR in `CurrencyConverter`, including rounding;
+- each handler's input validation, and every strategy applied by `AdjustBalanceHandler` through the real factory;
+- reading rates from the cache with a database fallback;
+- the job refreshing the cache only after a successful sync.
+
+Test names follow `Method_Scenario_Result`.
 
 ### Integration tests
 
-- **Rate limiting** hosts the real `WalletController` with the production rate limiting setup and mocked handlers. It covers the 429 response, per-endpoint limits, shared budgets across route values and across two app nodes, atomicity under 50 concurrent requests, trusted and spoofed `X-Forwarded-For`, IPv6 `/64` grouping, and failing open when Redis is down.
-- **Currency rates cache** runs the production cache registrations against Redis. It covers exact decimal round-trips, atomic replacement, the conditional read-through fill, the TTL, unreadable data, and failing open.
-- **ECB gateway** parses canned feed responses: every rate plus the EUR base, malformed entries, parsing independent of culture, and error statuses.
+- **Rate limiting** hosts the real `WalletController` with the production rate limiting setup and mocked handlers. It covers the 429 response, per-endpoint limits, budgets shared across route values and across two app nodes, 50 concurrent requests not exceeding the limit, trusted and spoofed `X-Forwarded-For`, IPv6 `/64` grouping, and carrying on when Redis is down.
+- **Currency rates cache** runs the production cache setup against Redis: exact decimal round trips, atomic replacement, the conditional fill on a miss, the TTL, unreadable data, and carrying on when Redis is down.
+- **ECB gateway** parses canned feed responses: every rate plus the EUR base, malformed entries, parsing that doesn't depend on culture, and error statuses.
 - **Startup validation** checks that bad trusted-proxy settings and missing connection strings stop the host.
-- **Error handling** hosts the real `WalletController` with handlers that throw. It checks that each domain exception returns its status code and `code`, and that unexpected exceptions (including a stray `ArgumentException`) return a generic `500` without leaking the exception message. No Redis or database needed.
+- **Error handling** hosts the real `WalletController` with handlers that throw. It checks that each domain exception gets its status code and `code`, and that unexpected exceptions (including a stray `ArgumentException`) return a generic `500` without leaking the message. No Redis or database needed.
 
 ### Functional tests
 
-These boot the real `Program.cs` (DI, middleware, migrations) against real SQL Server and Redis containers:
+These start the real `Program.cs` (DI, middleware, migrations) against real SQL Server and Redis containers:
 
 - **Wallet lifecycle:** create, read, each strategy, and every error path (400, 404, and 422 for insufficient funds), each checked against its [error code](#errors). Failed requests leave the balance unchanged.
-- **ECB rate merge:** the raw SQL `MERGE` against SQL Server. It inserts missing dates, updates only changed rates (unchanged rows keep their `UpdatedAt`), keeps the history per date, does nothing on a repeat, stores the full `decimal(18,6)` precision, and rejects more rates than one statement can carry.
-- **Idempotency and concurrency:** replays, key reuse with a different request (422), parallel retries with the same key applied exactly once, and parallel adjustments never losing an update.
-- **Currency conversion:** the full path from ECB feed to sync job, SQL Server, Redis and the endpoint. Also: rates are served from Redis rather than SQL Server, an empty cache falls back to the database and refills, new rates are served after a sync, and a currency the ECB drops keeps its last rate. Adjustments in another currency: credits and debits at the synced rate (including between two non-EUR currencies), the overdraft rule checked on the converted amount, and unknown currencies or amounts too small to convert rejected without changing the balance.
+- **ECB rate merge:** the raw SQL `MERGE` against SQL Server. It inserts missing dates, updates only rates that changed (unchanged rows keep their `UpdatedAt`), keeps the history per date, does nothing when repeated, keeps the full `decimal(18,6)` precision, and rejects more rates than one statement can carry.
+- **Idempotency and concurrency:** replays, reusing a key for a different request (422), parallel retries with the same key applied exactly once, and parallel adjustments never losing an update.
+- **Currency conversion:** the whole path from the ECB feed through the sync job, SQL Server and Redis to the endpoint. It also checks that rates are served from Redis rather than SQL Server, that an empty cache falls back to the database and refills, that new rates show up after a sync, and that a currency the ECB drops keeps its last rate. For adjustments in another currency, it checks credits and debits at the synced rate (including between two non-EUR currencies), the overdraft rule applied to the converted amount, and unknown currencies or amounts too small to convert being rejected without touching the balance.
 
-A few design choices keep these tests reliable:
+A few choices keep these tests reliable:
 
-- **Real SQL Server, not EF Core's in-memory provider.** Idempotency and lost-update protection depend on SQL Server enforcing the wallet row version and the idempotency key's primary key. The in-memory provider doesn't enforce those, so these tests would pass there even with the protections broken.
-- **The Quartz scheduler doesn't run.** Tests call the real `EcbSyncJob` when they need a sync, instead of racing a background trigger.
-- **Tests never depend on each other's data.** Each creates its own wallets, and each test that changes rates owns one currency (see [FakeEcbFeed](tests/Functional.Tests/Infrastructure/FakeEcbFeed.cs)). No database reset is needed between tests.
-- **The tests keep their own copies of the response contracts**, so renaming an API property breaks them the same way it would break clients.
-- **Test logs go to the test project's `bin/.../logs/`**, not `src/App.Host/logs`.
+- They use a real SQL Server, not EF Core's in-memory provider. Idempotency and lost-update protection rely on SQL Server enforcing the wallet's row version and the idempotency key's primary key. The in-memory provider enforces neither, so the tests would pass there even with the protections broken.
+- The Quartz scheduler doesn't run. Tests call the real `EcbSyncJob` when they need a sync, instead of racing a background trigger.
+- No test depends on another test's data. Each one creates its own wallets, and each test that changes rates owns one currency (see [FakeEcbFeed](tests/Functional.Tests/Infrastructure/FakeEcbFeed.cs)), so the database never needs resetting between tests.
+- The tests keep their own copies of the response contracts, so renaming an API property breaks them just like it would break a real client.
+- Test logs go to the test project's `bin/.../logs/`, not `src/App.Host/logs`.
 
 ## Design decisions and trade-offs
 
-The main calls, and what each one trades away:
+The main choices I made, and what each one costs:
 
-- **Built for several replicas from the start.** All shared state is in SQL Server or Redis, never in process memory. The price is a Redis dependency, which the app tolerates being down (below).
-- **Standalone gateway behind a port.** `Ecb.Gateway` is a reusable library, and the core defines the `IEcbGateway` port it needs, joined by an adapter in the host. That's one extra class, but each side can change or be replaced independently.
-- **Raw SQL `MERGE` for rates**, as the brief asks: one round trip and one transaction per sync, `HOLDLOCK` against concurrent inserts, parameters only. EF tracked entities would be simpler but make many statements.
-- **Redis snapshot, not an in-process cache.** All replicas see new rates as soon as the job finishes. The trade-off is a network hop per conversion; an in-process L1 cache is the next step if that ever matters.
-- **Fail open when Redis is down.** Rate limiting and the cache degrade (no limits, database reads) instead of failing requests. This favours availability; for endpoints where abuse is worse than downtime, fail closed instead.
-- **Fixed-window rate limiting.** It uses constant memory and gives an exact `Retry-After`, at the cost of allowing a burst of up to twice the limit across a window boundary. A sliding window would smooth that at more cost per request.
-- **Optimistic concurrency on wallets** (a SQL Server row version) rather than locks: no blocking, and a conflicting update gets `409` instead of silently losing money.
-- **Optional idempotency.** The endpoint works exactly as specified; an `Idempotency-Key` adds safe retries, stored in the same transaction as the balance change.
-- **One handler per use case, without a mediator.** Commands and queries have separate handlers and the read path doesn't track entities, but there's no MediatR and no separate read model: with three endpoints that would add indirection without benefit. A read model (e.g. a projection or a replica) is the next step if reads ever need to scale apart from writes.
-- **Strategies as an enum plus a Factory.** The allowed values are in the API contract (Swagger dropdown, typed clients), and the factory checks at startup that every value has exactly one implementation.
-- **One error shape.** Every failure, including framework validation, returns `{ "error", "code" }` with a stable `code`, and unexpected errors never leak internals.
-- **Tests at three levels, with real infrastructure where it matters.** Behaviour that depends on SQL Server (row versions, unique keys, `MERGE`) is tested against a real SQL Server container, not EF's in-memory provider, which wouldn't enforce any of it.
+- **Built for several replicas from day one.** All shared state is in SQL Server or Redis, never in process memory. The cost is a dependency on Redis, which the app can survive losing (see below).
+- **A standalone gateway behind an interface.** `Ecb.Gateway` is a reusable library, the core defines the `IEcbGateway` interface it needs, and an adapter in the host joins them. It's one extra class, but either side can change or be replaced without touching the other.
+- **Raw SQL `MERGE` for rates**, as the brief asks. It's one round trip and one transaction per sync, with `HOLDLOCK` against concurrent inserts and parameters only. Tracked EF entities would be simpler, but would send many statements.
+- **A Redis snapshot instead of an in-process cache.** Every replica sees new rates as soon as the job finishes. The cost is a network hop per conversion, and a small in-process cache in front of Redis is the obvious next step if that ever matters.
+- **Carry on when Redis is down.** Rate limiting and the cache step aside (no limits, rates read from the database) instead of failing requests. That favours staying up. For an endpoint where abuse is worse than downtime, it should fail closed instead.
+- **Fixed-window rate limiting.** It uses very little memory and gives an exact `Retry-After`, but allows a burst of up to twice the limit around a window boundary. A sliding window would smooth that out at a higher cost per request.
+- **Optimistic concurrency on wallets** (a SQL Server row version) instead of locks. Nothing blocks, and a conflicting update gets a `409` instead of silently losing money.
+- **Optional idempotency.** The endpoint works exactly as specified, and an `Idempotency-Key` makes retries safe. The key is stored in the same transaction as the balance change.
+- **One handler per use case, without a mediator.** Commands and queries have their own handlers and reads don't track entities, but there's no MediatR and no separate read model. With three endpoints, that would only add indirection. A separate read model (a projection, or a read replica) is where to go if reads ever need to scale separately from writes; see [Scaling](#scaling).
+- **Strategies as an enum plus a factory.** The allowed values are part of the API contract (the Swagger dropdown, typed clients), and the factory checks at startup that every value has exactly one implementation.
+- **One error format.** Every failure, framework validation included, returns `{ "error", "code" }` with a stable `code`, and unexpected errors never leak internals.
+- **Tests at three levels, with real infrastructure where it counts.** Anything that depends on SQL Server behaviour (row versions, unique keys, `MERGE`) runs against a real SQL Server container, because EF's in-memory provider wouldn't enforce any of it.
+
+## Scaling
+
+The API already runs as several identical replicas behind a load balancer, so handling more traffic starts with adding replicas. That works up to a point, and then the pressure moves to the shared pieces behind them, mostly SQL Server. This section is what I'd look at next, roughly in the order I'd expect to need it. None of it is built. It's the plan, not the current state.
+
+**Measure first.** Before changing anything, I'd run a load test (k6, for example) with a realistic mix of reads and adjustments, and watch SQL Server, Redis and the replicas. Guessing at bottlenecks usually means optimising the wrong thing. My expectation is that SQL Server hits its limit well before the app does.
+
+**Busy wallets.** Wallets use optimistic concurrency: an adjustment reads the wallet, changes it, and saves it only if nobody else changed it in the meantime. That's cheap and safe while adjustments to the same wallet are spread out. If one wallet gets a lot of adjustments at once (a merchant's wallet, say), most of them will lose the race and get a `409`. There are a few ways to handle that, from least to most work:
+
+1. Retry on the server. When a save loses the race, nothing was written, so `AdjustBalanceHandler` can reload the wallet and try again a couple of times with a small random delay before giving up with a `409`. Clients see far fewer conflicts, and nothing else changes.
+2. Change the balance in one SQL statement, e.g. `UPDATE AccountWallets SET Balance = Balance + @amount WHERE Id = @id AND Balance >= @amount`. The database applies concurrent adjustments one after another, so there's no race to lose. The overdraft rule then has to live in the `WHERE` clause, and the idempotency record still has to be saved in the same transaction.
+3. Record adjustments in a ledger. Adding a row per adjustment and calculating the balance from those rows means writes never fight over the same row. It's also what [Known limitations](#known-limitations-and-next-steps) suggests for auditing anyway, but it's the biggest change of the three.
+
+**Move reads to a replica.** Reads and writes already go through separate handlers, so pointing `GetBalanceHandler` at a readable SQL Server secondary (a connection string with `ApplicationIntent=ReadOnly`) is a small change. That takes balance reads off the primary. The catch is that a replica can lag slightly, so a balance read straight after an adjustment might briefly show the old value. For a display endpoint that's usually acceptable, and anything that needs the exact latest balance can keep reading from the primary.
+
+**Clean up idempotency records.** Every adjustment sent with an `Idempotency-Key` leaves a row in `IdempotencyRecords`, and nothing ever deletes them, so the table grows forever. Clients only retry for minutes or hours, so the records only need to be kept for a limited time, say 24 hours to a few days. A Quartz job, clustered like the ECB sync, could delete older rows in small batches. The table already has a `CreatedAt` column, but it would need an index on it. This one is worth doing even without a traffic increase.
+
+**Watch the connection count.** Each replica keeps its own pool of database connections, so the total is the number of replicas times the pool size, and it has to stay under what SQL Server allows. That's easy to forget when scaling out. Switching to `AddDbContextPool` also reuses `DbContext` instances between requests instead of building a new one each time, which helps under load.
+
+**Redis.** Every rate-limited request makes one round trip to Redis, so Redis load grows with traffic. A managed Redis cluster handles that, and the rate limit keys already use hash tags so they work with Redis Cluster. For the rates cache, a short-lived in-memory cache in front of Redis would remove most of those calls (see [Production considerations](#currency-rates-cache-1)).
+
+**Split wallets across databases.** If writes ever outgrow one SQL Server primary, even after all of the above, wallets could be split across several databases by wallet ID. That's a big step: routing, migrations and reporting all get harder. I'd only consider it once the options above have run out.
+
+The ECB sync job doesn't need to scale. It runs once a minute on a single node and writes about 30 rows in one statement, no matter how much traffic the API gets.
 
 ## Known limitations and next steps
 
-What a production version would add, roughly in priority order:
+What a production version would add, roughly in order of importance:
 
-1. **A transaction ledger.** Adjustments change the wallet's balance directly; there's no history of credits and debits. A real wallet would record every adjustment in an append-only ledger (amount, currency, rate used, strategy, idempotency key), with the balance derived from it or reconciled against it. That enables audits, statements and dispute handling.
-2. **Authentication and authorisation.** Any client can read or adjust any wallet. Next: authenticate callers, check wallet ownership, and key rate limits on the user or API key instead of the IP.
-3. **Observability.** Health checks exist ([`/health`](#health-checks)); next are metrics (request rates, `429`s, cache hit ratio, sync duration and failures) and distributed tracing, e.g. with OpenTelemetry.
-4. **Deployment.** Run migrations as a separate deployment step rather than at startup, publish the Docker image from CI, and use a secret store and a least-privilege SQL login. See [Production considerations](#production-considerations).
-5. **Rates when none are synced yet.** Right after the very first start, before the first sync, conversions return `400 unsupported_currency`. `503` with `Retry-After` would describe that better.
+1. **A transaction ledger.** Adjustments change the wallet's balance directly, and there's no history of credits and debits. A real wallet would record every adjustment in an append-only ledger (amount, currency, rate used, strategy, idempotency key), with the balance calculated from it or checked against it. That's what makes audits, statements and disputes possible.
+2. **Authentication and authorisation.** Right now any client can read or adjust any wallet. The next step is to authenticate callers, check that they own the wallet, and rate limit per user or API key instead of per IP.
+3. **Observability.** There are [health checks](#health-checks), but no metrics yet (request rates, `429`s, cache hit rate, sync duration and failures) and no distributed tracing. OpenTelemetry would cover both.
+4. **Deployment.** Run migrations as their own deployment step instead of at startup, publish the Docker image from CI, and use a secret store and a SQL login with only the permissions it needs. See [Production considerations](#production-considerations).
+5. **Rates before the first sync.** Right after the very first start, before the job has run, conversions return `400 unsupported_currency`. A `503` with `Retry-After` would describe the situation better.
 
 ## Production considerations
 
-The code is built to run as several replicas behind a load balancer, as the [load-balanced setup](#load-balanced-setup) shows. Rate limit counters live in Redis, and the Quartz ECB sync job uses a clustered SQL Server job store, so each trigger runs on exactly one node. A real deployment would also need the following.
+The app is built to run as several replicas behind a load balancer, as the [load-balanced setup](#load-balanced-setup) shows. Rate limit counters live in Redis, and the ECB sync job uses a clustered Quartz job store in SQL Server, so each trigger runs on exactly one node. A real deployment would also need the following.
 
 ### Load balancer and client IP
 
-- **Trust exactly your proxies.** Set `ForwardedHeaders:KnownProxies` or `ForwardedHeaders:KnownNetworks` to your load balancer's addresses, and `ForwardLimit` to the number of proxy hops in front of the app. Without this, every client shares the load balancer's budget. Don't trust a whole network you don't control, or clients can fake their IP.
-- **The first proxy decides the client IP.** It must overwrite `X-Forwarded-For` with the connecting address (e.g. nginx `proxy_set_header X-Forwarded-For $remote_addr;`) or append to it. The app reads only the right-most `ForwardLimit` entries, so values a client adds itself are ignored either way.
-- **Terminate TLS at the load balancer** and forward `X-Forwarded-Proto`, which the app already honours.
+- Trust exactly your proxies and nothing more. Set `ForwardedHeaders:KnownProxies` or `ForwardedHeaders:KnownNetworks` to your load balancer's addresses, and `ForwardLimit` to the number of proxy hops in front of the app. Without this, all clients share the load balancer's budget. Don't trust a whole network you don't control, or clients will be able to fake their IP.
+- The first proxy decides the client IP. It has to either overwrite `X-Forwarded-For` with the connecting address (in nginx, `proxy_set_header X-Forwarded-For $remote_addr;`) or append to it. The app only reads the right-most `ForwardLimit` entries, so anything a client adds itself is ignored either way.
+- Terminate TLS at the load balancer and forward `X-Forwarded-Proto`, which the app already understands.
 
 ### Rate limiting
 
-- **This is fair-usage limiting, not DDoS protection.** Every rejected request still reaches the app and Redis. Put volumetric protection in front of it, such as a WAF, CDN or cloud load balancer rate rules.
-- **Shared IPs share a budget.** Users behind corporate NAT or mobile carrier gateways appear as one IP. Once the API has authentication, key the limit on the user or API key instead, and keep the IP limit for anonymous traffic.
-- **Fail-open is a deliberate trade-off.** If Redis goes down, the app keeps serving without limits and logs `Rate limiter store is unavailable`. Alert on that log line. If abuse is worse than downtime for an endpoint, change it to fail closed in [FailOpenRateLimiter.cs](src/App.Host/Infrastructure/RateLimiting/FailOpenRateLimiter.cs).
-- **Keep node clocks in sync (NTP).** Window start and expiry times come from each app node's clock, so clock drift between nodes shifts window boundaries.
-- **Tune limits from real traffic.** Watch the `Rate limit exceeded` warnings, and remember that limits can be changed per environment through configuration without code changes.
+- This limits fair usage. It doesn't protect against DDoS, because every rejected request still reaches the app and Redis. Put something in front for that, such as a WAF, a CDN or the cloud load balancer's own rate rules.
+- Clients sharing an IP share a budget. Users behind a corporate NAT or a mobile carrier's gateway all look like one IP. Once the API has authentication, limit per user or API key, and keep the IP limit for anonymous traffic.
+- Letting requests through when Redis is down is a deliberate choice. The app keeps serving without limits and logs `Rate limiter store is unavailable`, so set up an alert on that line. If abuse is worse than downtime for an endpoint, change it to fail closed in [FailOpenRateLimiter.cs](src/App.Host/Infrastructure/RateLimiting/FailOpenRateLimiter.cs).
+- Keep the nodes' clocks in sync (NTP). Window start and expiry times come from each node's clock, so drift between nodes shifts the window boundaries.
+- Tune the limits from real traffic. Watch the `Rate limit exceeded` warnings. Limits can be changed per environment through configuration, with no code change.
 
 ### Redis
 
-- **Use a managed, highly available Redis** (e.g. AWS ElastiCache, Azure Cache for Redis, or Sentinel/Cluster). Rate limit keys use hash tags (`rl:fw:{client|endpoint}`), so they work with Redis Cluster.
-- **Enable authentication and TLS** through the connection string, e.g. `my-redis:6380,password=...,ssl=true`.
-- **Memory stays small.** Each active client/endpoint pair uses two small keys, and Redis expires them automatically when their window ends. The currency rates cache is one hash of about 30 fields. Set a `maxmemory` policy anyway, and prefer `volatile-lru` or `allkeys-lru` over `noeviction`: every key the app writes has a TTL, and a full Redis should evict keys, not reject writes.
+- Use a managed, highly available Redis, such as AWS ElastiCache, Azure Cache for Redis, or Sentinel/Cluster. The rate limit keys use hash tags (`rl:fw:{client|endpoint}`), so they work with Redis Cluster.
+- Turn on authentication and TLS through the connection string, e.g. `my-redis:6380,password=...,ssl=true`.
+- Memory use stays small. Each active client and endpoint pair uses two small keys, which Redis deletes when their window ends, and the rates cache is one hash of about 30 fields. Set a `maxmemory` policy anyway, and pick `volatile-lru` or `allkeys-lru` rather than `noeviction`. Every key the app writes has a TTL, and a full Redis should evict keys rather than refuse writes.
 
 ### Deployment
 
-- **Deploy the image, not the source.** The [Dockerfile](Dockerfile) already builds a production image; publish it from CI with a versioned tag instead of building on the host.
-- **Keep secrets out of the repo.** Inject connection strings from a secret store (e.g. Key Vault, AWS Secrets Manager, Kubernetes secrets) rather than `.env`, and use a least-privilege SQL login instead of `sa`.
-- **Run migrations as a separate deployment step** rather than at app startup. The app's SQL login then needs no permission to change the schema, and a failed migration stops the deployment instead of crash-looping every replica.
-- **Point the load balancer and orchestrator at the [health checks](#health-checks):** `/health` for readiness and routing, `/health/live` for liveness. Restrict who can reach them if the API is public.
+- Deploy the image, not the source. The [Dockerfile](Dockerfile) already builds a production image, so publish it from CI with a version tag instead of building on the server.
+- Keep secrets out of the repo. Inject connection strings from a secret store (Key Vault, AWS Secrets Manager, Kubernetes secrets) rather than `.env`, and use a SQL login with limited permissions instead of `sa`.
+- Run migrations as a separate deployment step rather than at app startup. The app's SQL login then doesn't need permission to change the schema, and a failed migration stops the deployment instead of crash-looping every replica.
+- Point the load balancer and orchestrator at the [health checks](#health-checks): `/health` for readiness and routing, `/health/live` for liveness. Restrict who can reach them if the API is public.
 
 ### Currency rates cache
 
-- **Alert on `Currency rates cache is unavailable`.** Requests keep working through the database fallback, but all conversion traffic then hits SQL Server.
-- **Staleness is bounded by the job interval.** Replicas never disagree on rates, because they all read the same snapshot. After a Redis outage, a snapshot Redis restored from disk is served until the next job run (at most one minute). ECB publishes new rates once a day, so this is well within tolerance.
-- **A cold cache isn't single-flighted.** While the cache is empty (only until the first job run after startup, or after the key is lost), concurrent requests each run the small, indexed "latest rates" query. If conversion traffic grows enough for that to matter, add a per-node single-flight or warm the cache at startup.
-- **An in-process L1 cache is the next step if Redis latency ever matters.** A short-TTL memory cache in front of Redis would remove the network hop, at the cost of each node lagging by up to that TTL. It isn't needed at today's load.
-- **HybridCache was considered and not used.** Its in-memory tier isn't updated on other nodes when the job writes new rates, so nodes could briefly serve different rates.
+- Alert on `Currency rates cache is unavailable`. Requests keep working by reading from the database, but then all conversion traffic hits SQL Server.
+- Rates can be at most one job interval out of date. Replicas never disagree, because they all read the same snapshot. After a Redis outage, a snapshot that Redis restored from disk is served until the next job run, at most a minute later. The ECB only publishes new rates once a day, so that's fine.
+- An empty cache isn't protected against a stampede. While it's empty (only until the first job run after startup, or if the key is lost), concurrent requests each run the small, indexed "latest rates" query. If conversion traffic grows enough for that to matter, let one request per node do the query while the rest wait for it, or fill the cache at startup.
+- If Redis latency ever matters, a short-lived in-memory cache in front of Redis would remove the network hop, at the cost of each node lagging by up to that cache's lifetime. It isn't needed at the current load.
+- I looked at HybridCache and decided against it. Its in-memory layer isn't updated on the other nodes when the job writes new rates, so nodes could briefly serve different rates.

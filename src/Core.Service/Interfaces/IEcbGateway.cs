@@ -9,7 +9,7 @@ namespace Core.Service.Interfaces;
 public interface IEcbGateway
 {
     /// <summary>
-    /// Fetches and extracts the daily currency exchange benchmarks directly from the ECB feed.
+    /// Fetches the latest daily rates from the ECB, including EUR at 1.
     /// </summary>
     Task<IEnumerable<EcbRateResult>> FetchDailyRatesAsync(CancellationToken cancellationToken = default);
 }

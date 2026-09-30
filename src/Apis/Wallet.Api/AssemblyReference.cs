@@ -1,8 +1,7 @@
 namespace Wallet.Api;
 
 /// <summary>
-/// A completely empty marker class used to provide a strongly-typed reference 
-/// to this assembly for automated Dependency Injection and controller discovery.
+/// Empty on purpose. It gives the host a type to point at when it adds this assembly's controllers.
 /// </summary>
 public static class AssemblyReference
 {

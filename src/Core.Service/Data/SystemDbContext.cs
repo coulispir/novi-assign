@@ -18,7 +18,7 @@ public class SystemDbContext : DbContext
     {
         base.OnModelCreating(modelBuilder);
 
-        // Scanning assembly dynamically registers all IEntityTypeConfiguration maps automatically
+        // Picks up every IEntityTypeConfiguration in Data/Configurations
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(SystemDbContext).Assembly);
     }
 }

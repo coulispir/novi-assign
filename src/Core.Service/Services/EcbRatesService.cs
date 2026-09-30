@@ -27,7 +27,6 @@ public class EcbRatesService : IEcbRatesService
 
     public async Task<EcbSyncSummary> SyncLatestRatesAsync(CancellationToken cancellationToken = default)
     {
-        // Fetch live rate payloads from the external XML gateway
         var fetchedRates = (await _ecbGateway.FetchDailyRatesAsync(cancellationToken)).ToList();
 
         if (fetchedRates.Count == 0)

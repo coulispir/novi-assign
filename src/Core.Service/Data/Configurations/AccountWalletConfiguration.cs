@@ -29,9 +29,9 @@ public class AccountWalletConfiguration : IEntityTypeConfiguration<AccountWallet
         builder.Property(w => w.UpdatedAt)
             .IsRequired();
 
-        // Maps to a native SQL Server 'rowversion' / 'timestamp' data column.
-        // If two threads read a wallet and try to update its balance at the exact same instant, 
-        // SQL Server will reject the second transaction with a DbUpdateConcurrencyException.
+        // SQL Server changes the rowversion on every update, and EF only saves if it still matches what was read.
+        // If two requests read the same wallet and both try to save, the second one gets a DbUpdateConcurrencyException
+        // instead of overwriting the first.
         builder.Property(w => w.RowVersion)
             .IsRowVersion()
             .IsConcurrencyToken();
